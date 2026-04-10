@@ -16,7 +16,8 @@ class RewardFunction:
         goal_reward: float = 50.0,
         time_penalty: float = -0.1,
         efficiency_weight: float = 0.5,
-        min_safe_distance: float = 5.0
+        min_safe_distance: float = 5.0,
+        progress_weight: float = 0.1,
     ):
         """
         Initialize reward function parameters.
@@ -27,12 +28,14 @@ class RewardFunction:
             time_penalty: Small negative reward per time step
             efficiency_weight: Weight for speed/efficiency component
             min_safe_distance: Minimum safe distance between vehicles (meters)
+            progress_weight: Weight for dense progress-toward-goal reward
         """
         self.collision_penalty = collision_penalty
         self.goal_reward = goal_reward
         self.time_penalty = time_penalty
         self.efficiency_weight = efficiency_weight
         self.min_safe_distance = min_safe_distance
+        self.progress_weight = progress_weight
     
     def compute(
         self,
@@ -42,7 +45,9 @@ class RewardFunction:
         goal2: Tuple[float, float],
         collision: bool,
         done1: bool,
-        done2: bool
+        done2: bool,
+        prev_goal_dist_1: float = 0.0,
+        prev_goal_dist_2: float = 0.0,
     ) -> Tuple[float, float]:
         """
         Compute rewards for both vehicles.
@@ -55,6 +60,8 @@ class RewardFunction:
             collision: Whether collision occurred
             done1: Whether vehicle 1 reached goal
             done2: Whether vehicle 2 reached goal
+            prev_goal_dist_1: Distance to goal for vehicle 1 at the previous step
+            prev_goal_dist_2: Distance to goal for vehicle 2 at the previous step
         
         Returns:
             Tuple of (reward1, reward2)
@@ -96,7 +103,15 @@ class RewardFunction:
             proximity_penalty = -1.0 * (1.0 - distance / self.min_safe_distance)
             reward1 += proximity_penalty
             reward2 += proximity_penalty
-        
+
+        # Progress reward: dense shaping toward goal (prev_dist - curr_dist > 0 when closer)
+        curr_goal_dist_1 = np.sqrt((state1[0] - goal1[0])**2 + (state1[1] - goal1[1])**2)
+        curr_goal_dist_2 = np.sqrt((state2[0] - goal2[0])**2 + (state2[1] - goal2[1])**2)
+        if not done1 and prev_goal_dist_1 > 0.0:
+            reward1 += self.progress_weight * (prev_goal_dist_1 - curr_goal_dist_1)
+        if not done2 and prev_goal_dist_2 > 0.0:
+            reward2 += self.progress_weight * (prev_goal_dist_2 - curr_goal_dist_2)
+
         return reward1, reward2
     
     def compute_single(

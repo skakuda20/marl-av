@@ -85,6 +85,12 @@ class IntersectionEnv(gym.Env):
         self.state_1 = None
         self.state_2 = None
         self.steps = 0
+        # Persistent goal-reached flags (latch True, never reset mid-episode)
+        self._done_1: bool = False
+        self._done_2: bool = False
+        # Previous goal distances for progress reward computation
+        self._prev_goal_dist_1: float = 0.0
+        self._prev_goal_dist_2: float = 0.0
         
     def reset(
         self, 
@@ -104,10 +110,14 @@ class IntersectionEnv(gym.Env):
         self.state_1 = np.concatenate([self.start_pos_1, self.start_vel_1])
         self.state_2 = np.concatenate([self.start_pos_2, self.start_vel_2])
         self.steps = 0
-        
+        self._done_1 = False
+        self._done_2 = False
+        self._prev_goal_dist_1 = self.dynamics.distance_to_point(self.state_1, self.goal_pos_1)
+        self._prev_goal_dist_2 = self.dynamics.distance_to_point(self.state_2, self.goal_pos_2)
+
         obs = self._get_obs()
         info = self._get_info()
-        
+
         return obs, info
     
     def step(self, action: np.ndarray) -> Tuple[Dict, Dict, bool, bool, Dict]:
@@ -127,40 +137,54 @@ class IntersectionEnv(gym.Env):
         # Extract actions
         action_1 = action[0]
         action_2 = action[1]
-        
-        # Update states using dynamics
-        self.state_1 = self.dynamics.step(self.state_1, action_1)
-        self.state_2 = self.dynamics.step(self.state_2, action_2)
-        
+
+        # Only update physics for vehicles that haven't reached their goal yet
+        if not self._done_1:
+            self.state_1 = self.dynamics.step(self.state_1, action_1)
+        if not self._done_2:
+            self.state_2 = self.dynamics.step(self.state_2, action_2)
+
         self.steps += 1
-        
+
         # Check termination conditions
         collision = self.dynamics.check_collision(self.state_1, self.state_2)
-        
+
         dist_to_goal_1 = self.dynamics.distance_to_point(self.state_1, self.goal_pos_1)
         dist_to_goal_2 = self.dynamics.distance_to_point(self.state_2, self.goal_pos_2)
-        
-        done_1 = dist_to_goal_1 < self.goal_threshold
-        done_2 = dist_to_goal_2 < self.goal_threshold
-        
-        # Episode terminates if collision or both reach goal
+
+        # Latch goal flags — once True they stay True for the rest of the episode
+        if dist_to_goal_1 < self.goal_threshold:
+            self._done_1 = True
+        if dist_to_goal_2 < self.goal_threshold:
+            self._done_2 = True
+
+        done_1 = self._done_1
+        done_2 = self._done_2
+
+        # Episode terminates if collision or both vehicles have reached their goals
         terminated = collision or (done_1 and done_2)
         truncated = self.steps >= self.max_steps
-        
-        # Compute rewards
+
+        # Compute rewards, passing previous goal distances for progress shaping
         reward_1, reward_2 = self.reward_fn.compute(
             self.state_1, self.state_2,
             self.goal_pos_1, self.goal_pos_2,
-            collision, done_1, done_2
+            collision, done_1, done_2,
+            prev_goal_dist_1=self._prev_goal_dist_1,
+            prev_goal_dist_2=self._prev_goal_dist_2,
         )
-        
+
+        # Update previous distances for next step
+        self._prev_goal_dist_1 = dist_to_goal_1
+        self._prev_goal_dist_2 = dist_to_goal_2
+
         obs = self._get_obs()
         reward = {"agent_1": reward_1, "agent_2": reward_2}
         info = self._get_info()
         info["collision"] = collision
         info["done_1"] = done_1
         info["done_2"] = done_2
-        
+
         return obs, reward, terminated, truncated, info
     
     def _get_obs(self) -> Dict[str, np.ndarray]:

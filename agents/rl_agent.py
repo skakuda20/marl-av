@@ -24,11 +24,18 @@ NUM_ACTIONS = len(DISCRETE_ACTIONS)
 _GOAL_DIST_BINS = np.array([4.0, 8.0, 12.0, 16.0])   # → 5 bins
 _OTHER_DIST_BINS = np.array([4.0, 8.0, 12.0, 16.0])  # → 5 bins
 _SPEED_BINS = np.array([3.0, 6.0, 9.0])               # → 4 bins
+# Intersection phase: far (>24 m to goal), approaching (14–24 m), clearing (<14 m)
+# Goal starts at ~40 m; intersection is ~20 m from start; goal is ~20 m past intersection.
+# Thresholds: >24 m = not yet at intersection, 14–24 m = in/near crossing zone, <14 m = past it.
+_PHASE_BINS = np.array([14.0, 24.0])                  # → 3 bins (0=clearing, 1=crossing, 2=far)
 
-NUM_STATES = 5 * 5 * 4  # 100
+# Agent identity adds one binary dimension (0=agent_1, 1=agent_2),
+# preventing the two agents from converging to symmetric deadlock policies.
+_STATES_PER_AGENT = 5 * 5 * 4 * 3  # 300
+NUM_STATES = _STATES_PER_AGENT * 2  # 600
 
 
-def _discretize_obs(obs: np.ndarray) -> int:
+def _discretize_obs(obs: np.ndarray, agent_index: int) -> int:
     """
     Map a continuous observation to an integer state index.
 
@@ -40,14 +47,24 @@ def _discretize_obs(obs: np.ndarray) -> int:
         8    distance to own goal
         9    distance to other vehicle
 
+    Args:
+        agent_index: 0 for agent_1, 1 for agent_2.  Separates each agent's
+                     region of the Q-table so they can learn different roles
+                     (e.g. yielder vs. priority vehicle) without symmetric
+                     deadlock.
+
     Returns:
         Integer in [0, NUM_STATES).
     """
-    goal_bin = int(np.searchsorted(_GOAL_DIST_BINS, obs[8]))
+    goal_bin  = int(np.searchsorted(_GOAL_DIST_BINS,  obs[8]))
     other_bin = int(np.searchsorted(_OTHER_DIST_BINS, obs[9]))
     speed = np.sqrt(obs[2] ** 2 + obs[3] ** 2)
     speed_bin = int(np.searchsorted(_SPEED_BINS, speed))
-    return goal_bin * 20 + other_bin * 4 + speed_bin
+    # Intersection phase based on distance to own goal:
+    #   bin 0 = clearing (<14 m), bin 1 = crossing zone (14-24 m), bin 2 = far (>24 m)
+    phase_bin = int(np.searchsorted(_PHASE_BINS, obs[8]))
+    base = goal_bin * 60 + other_bin * 12 + speed_bin * 3 + phase_bin
+    return agent_index * _STATES_PER_AGENT + base
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +111,10 @@ class RLAgent:
         self.epsilon_min = epsilon_min
         self.epsilon_decay = epsilon_decay
 
+        # Derive a stable integer index for Q-table partitioning.
+        # "agent_1" → 0, anything else (e.g. "agent_2") → 1.
+        self._agent_index: int = 0 if agent_id == "agent_1" else 1
+
         self.q_table = np.zeros((NUM_STATES, NUM_ACTIONS))
 
     def get_action(self, observation: np.ndarray, training: bool = False) -> float:
@@ -107,7 +128,7 @@ class RLAgent:
         Returns:
             Continuous action value in [-1, 1].
         """
-        state = _discretize_obs(observation)
+        state = _discretize_obs(observation, self._agent_index)
         if training and np.random.random() < self.epsilon:
             return float(np.random.choice(DISCRETE_ACTIONS))
         action_idx = int(np.argmax(self.q_table[state]))
@@ -134,8 +155,8 @@ class RLAgent:
             next_obs: Observation after the action, shape (10,).
             done: Whether the episode terminated or was truncated.
         """
-        state = _discretize_obs(obs)
-        next_state = _discretize_obs(next_obs)
+        state = _discretize_obs(obs, self._agent_index)
+        next_state = _discretize_obs(next_obs, self._agent_index)
         action_idx = int(np.argmin(np.abs(DISCRETE_ACTIONS - action)))
 
         target = reward

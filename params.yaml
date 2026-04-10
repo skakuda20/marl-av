@@ -1,0 +1,66 @@
+# marl-av experiment parameters
+# Edit this file and re-run `python3 run_experiment.py` to reproduce results.
+
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
+env:
+  dt: 0.1           # time step (seconds)
+  max_steps: 400    # episode length cap (increased to allow cooperative yielding)
+  goal_threshold: 2.0  # metres within which a vehicle is considered done
+
+# ---------------------------------------------------------------------------
+# Reward shaping
+# ---------------------------------------------------------------------------
+rewards:
+  collision_penalty: -100.0
+  goal_reward: 50.0
+  time_penalty: -0.05   # reduced to soften cost of yielding
+  efficiency_weight: 0.5
+  min_safe_distance: 5.0
+  progress_weight: 0.1  # dense reward for moving toward goal
+
+# ---------------------------------------------------------------------------
+# SVO (Social Value Orientation) angles — in degrees for readability.
+# Common presets:  selfish=0, prosocial=45, altruistic=90, competitive=-45
+# ---------------------------------------------------------------------------
+svo:
+  agent_1_degrees: 45.0   # prosocial
+  agent_2_degrees: 0.0    # selfish
+
+# ---------------------------------------------------------------------------
+# Q-learning hyperparameters
+# ---------------------------------------------------------------------------
+q_learning:
+  learning_rate: 0.1
+  discount: 0.99
+  epsilon_start: 1.0
+  epsilon_min: 0.05
+  epsilon_decay: 0.995
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+training:
+  num_episodes: 5000
+  log_interval: 100     # episodes between progress prints
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+evaluation:
+  num_eval_episodes: 200
+  # Heuristic baselines to include in the comparison table.
+  # Each entry is a pair of policy names:
+  #   valid names: constant, cautious, aggressive, yield
+  baselines:
+    - ["cautious",   "aggressive"]
+    - ["yield",      "aggressive"]
+    - ["yield",      "cautious"]
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+output:
+  save_q_tables: true
+  results_dir: "results"   # directory for .npz Q-tables and metrics JSON

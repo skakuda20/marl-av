@@ -125,3 +125,33 @@ class RewardFunction:
         dummy_goal = (0.0, 0.0)
         r1, r2 = self.compute(state, other_state, goal, dummy_goal, collision, done, False)
         return r1
+
+
+# ---------------------------------------------------------------------------
+# Social Value Orientation (SVO)
+# ---------------------------------------------------------------------------
+
+# Common SVO angle presets (radians)
+SVO_SELFISH: float = 0.0           # cares only about own reward
+SVO_PROSOCIAL: float = np.pi / 4   # equal weight to self and other
+SVO_ALTRUISTIC: float = np.pi / 2  # cares only about other's reward
+SVO_COMPETITIVE: float = -np.pi / 4  # maximises own reward minus other's
+
+
+def apply_svo_transform(r_self: float, r_other: float, phi: float) -> float:
+    """
+    Blend self-interested and other-regarding rewards via an SVO angle.
+
+    Formula:
+        r_svo = r_self * cos(phi) + r_other * sin(phi)
+
+    Args:
+        r_self: The agent's own raw reward.
+        r_other: The other agent's raw reward.
+        phi: SVO angle in radians. Use the SVO_* module constants for
+             common presets (SVO_SELFISH, SVO_PROSOCIAL, etc.).
+
+    Returns:
+        Scalar SVO-weighted reward.
+    """
+    return float(r_self * np.cos(phi) + r_other * np.sin(phi))

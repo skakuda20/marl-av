@@ -1,0 +1,24 @@
+- Gym env - unsigned intersection
+- Heuristic agents
+- RL agent
+  - Q-learning
+- SVO payoff structure
+- Logging metrics
+  - Collision rate
+  - Average time to clear intersection
+  - Average delay
+
+Recommended implementation order: 
+  → SVO reward modification 
+  → state discretization 
+  → Q-table + epsilon-greedy 
+  → Bellman update 
+  → training loop 
+  → evaluation
+
+Current testing:
+  - Heuristic agents: 100% collision rate, average time to clear intersection ~10s, average delay ~5s
+  - RL agent: 0% collision rate, average time to clear intersection ~8s, average delay ~3s
+
+  Notes:
+  - RL agent does not seem to be learning, success rate is not increasing

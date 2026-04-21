@@ -188,11 +188,16 @@ class YieldAgent(HeuristicAgent):
         own_dist_to_intersection = np.sqrt(own_x**2 + own_y**2)
         other_dist_to_intersection = np.sqrt(other_x**2 + other_y**2)
         
-        # Check if we're approaching intersection and other is closer or already there
-        if own_dist_to_intersection < self.intersection_zone + 5:
-            if other_dist_to_intersection < own_dist_to_intersection:
-                # Other vehicle is closer to intersection, yield
-                if distance_to_other < self.safe_distance:
+        # Check if we're approaching intersection and other is at least as close.
+        # Use a wider detection zone (zone+13) and >= comparison so the yield
+        # agent brakes even when both vehicles are equidistant — which happens
+        # whenever they start at the same distance and travel at the same speed.
+        # The wider safe_distance (×2) ensures braking starts early enough to
+        # actually slow before the conflict zone is reached.
+        if own_dist_to_intersection < self.intersection_zone + 13:
+            if other_dist_to_intersection <= own_dist_to_intersection:
+                # Other vehicle is at least as close to intersection; yield
+                if distance_to_other < self.safe_distance * 2:
                     return -0.5  # Moderate braking
         
         # Otherwise maintain speed

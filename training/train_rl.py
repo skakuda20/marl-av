@@ -26,6 +26,7 @@ def train_rl_agent(
     num_episodes: int = 2000,
     agent_1_svo: float = SVO_PROSOCIAL,
     agent_2_svo: float = SVO_SELFISH,
+    use_svo: bool = True,
     save_path: str = None,
     verbose: bool = True,
     log_interval: int = 100,
@@ -37,6 +38,11 @@ def train_rl_agent(
         num_episodes: Number of training episodes.
         agent_1_svo: SVO angle for agent 1 in radians.
         agent_2_svo: SVO angle for agent 2 in radians.
+        use_svo: If True (default), apply the SVO transform before each
+            Q-update so agents blend self and other rewards according to
+            their SVO angles.  If False, each agent updates on its own
+            raw reward only — equivalent to purely self-interested Q-learning
+            regardless of the svo_angle values set above.
         save_path: Optional .npz path to save Q-tables after training.
         verbose: Print progress every log_interval episodes.
         log_interval: Episodes between progress prints.
@@ -88,12 +94,17 @@ def train_rl_agent(
             raw_r1 = reward["agent_1"]
             raw_r2 = reward["agent_2"]
 
-            # SVO transform: each agent blends its own reward with the other's
-            svo_r1 = apply_svo_transform(raw_r1, raw_r2, agent_1.svo_angle)
-            svo_r2 = apply_svo_transform(raw_r2, raw_r1, agent_2.svo_angle)
+            if use_svo:
+                # SVO transform: each agent blends its own reward with the other's
+                upd_r1 = apply_svo_transform(raw_r1, raw_r2, agent_1.svo_angle)
+                upd_r2 = apply_svo_transform(raw_r2, raw_r1, agent_2.svo_angle)
+            else:
+                # No SVO: each agent updates on its own raw reward only
+                upd_r1 = raw_r1
+                upd_r2 = raw_r2
 
-            agent_1.update(obs_1, action_1, svo_r1, next_obs["agent_1"], done)
-            agent_2.update(obs_2, action_2, svo_r2, next_obs["agent_2"], done)
+            agent_1.update(obs_1, action_1, upd_r1, next_obs["agent_1"], done)
+            agent_2.update(obs_2, action_2, upd_r2, next_obs["agent_2"], done)
 
             obs = next_obs
             total_reward_1 += raw_r1
@@ -147,6 +158,29 @@ def train_rl_agent(
             print(f"Saved Q-tables to {save_path}")
 
     return agent_1, agent_2, metrics
+
+
+def load_rl_agents(npz_path: str):
+    """
+    Reconstruct a greedy (evaluation-ready) agent pair from a saved .npz file.
+
+    The .npz must contain keys: q_table_1, q_table_2, svo_1, svo_2
+    (as written by train_rl_agent with save_path set).
+
+    Args:
+        npz_path: Path to the .npz file produced by train_rl_agent.
+
+    Returns:
+        Tuple of (agent_1, agent_2) with epsilon=0 for greedy evaluation.
+    """
+    data = np.load(npz_path)
+    agent_1 = RLAgent("agent_1", svo_angle=float(data["svo_1"]))
+    agent_2 = RLAgent("agent_2", svo_angle=float(data["svo_2"]))
+    agent_1.q_table = data["q_table_1"]
+    agent_2.q_table = data["q_table_2"]
+    agent_1.epsilon = 0.0
+    agent_2.epsilon = 0.0
+    return agent_1, agent_2
 
 
 if __name__ == "__main__":

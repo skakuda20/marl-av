@@ -12,6 +12,7 @@ import numpy as np
 
 from agents.heuristic import BestResponseAgent, create_heuristic_agent
 from evaluation.compare_methods import run_eval_episodes
+from evaluation.metrics import summarize_episodes
 
 
 DEFAULT_POLICY_SET = ["constant", "cautious", "aggressive", "yield", "priority"]
@@ -44,6 +45,7 @@ def empirical_best_response(
     agent_id: str = "agent_1",
     candidate_policies: Iterable[str] = DEFAULT_POLICY_SET,
     n_episodes: int = 100,
+    utility_weights: Dict[str, float] | None = None,
 ) -> Tuple[BestResponseAgent, Dict[str, float]]:
     """
     Search a heuristic policy set for the highest-payoff empirical best response.
@@ -55,12 +57,20 @@ def empirical_best_response(
             agent_1 = create_heuristic_agent("agent_1", policy)
             agent_2 = create_heuristic_agent("agent_2", opponent_policy)
             episodes = run_eval_episodes(agent_1, agent_2, eval_env, n_episodes=n_episodes)
-            candidate_scores[policy] = float(np.mean([ep["total_reward_1"] for ep in episodes]))
+            candidate_scores[policy] = summarize_episodes(
+                episodes,
+                dt=env.dt,
+                utility_weights=utility_weights,
+            )["multi_objective_utility_1"]
         else:
             agent_1 = create_heuristic_agent("agent_1", opponent_policy)
             agent_2 = create_heuristic_agent("agent_2", policy)
             episodes = run_eval_episodes(agent_1, agent_2, eval_env, n_episodes=n_episodes)
-            candidate_scores[policy] = float(np.mean([ep["total_reward_2"] for ep in episodes]))
+            candidate_scores[policy] = summarize_episodes(
+                episodes,
+                dt=env.dt,
+                utility_weights=utility_weights,
+            )["multi_objective_utility_2"]
 
     best_policy = max(candidate_scores, key=candidate_scores.get)
     return (
@@ -73,6 +83,7 @@ def approximate_nash_equilibrium(
     env,
     candidate_policies: Iterable[str] = DEFAULT_POLICY_SET,
     n_episodes: int = 100,
+    utility_weights: Dict[str, float] | None = None,
 ) -> EmpiricalNashResult:
     """
     Find the lowest-exploitability pure-strategy profile in the heuristic policy set.
@@ -86,7 +97,15 @@ def approximate_nash_equilibrium(
             agent_1 = create_heuristic_agent("agent_1", policy_1)
             agent_2 = create_heuristic_agent("agent_2", policy_2)
             episodes = run_eval_episodes(agent_1, agent_2, eval_env, n_episodes=n_episodes)
-            payoff_matrix[(policy_1, policy_2)] = _mean_payoffs(episodes)
+            summary = summarize_episodes(
+                episodes,
+                dt=env.dt,
+                utility_weights=utility_weights,
+            )
+            payoff_matrix[(policy_1, policy_2)] = (
+                float(summary["multi_objective_utility_1"]),
+                float(summary["multi_objective_utility_2"]),
+            )
 
     best_result: EmpiricalNashResult | None = None
     for policy_1 in policies:

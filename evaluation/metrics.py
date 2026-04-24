@@ -9,6 +9,18 @@ from typing import Dict, List, Optional
 import numpy as np
 
 _UNIMPEDED_STEPS = 50
+DEFAULT_MULTI_OBJECTIVE_WEIGHTS = {
+    "success_rate": 100.0,
+    "collision_rate": -120.0,
+    "avg_time_to_clear": -2.5,
+    "avg_delay": -1.0,
+    "min_time_to_collision": 6.0,
+    "safety_margin": 3.0,
+    "avg_jerk": -1.5,
+    "reward_fairness": 20.0,
+    "avg_reward_self": 0.2,
+    "avg_reward_other": 0.05,
+}
 
 
 def _safe_mean(values: List[float], default: float = 0.0) -> float:
@@ -155,13 +167,40 @@ def compute_generalization_gap(
     return float(seen_metrics.get(key, 0.0) - unseen_metrics.get(key, 0.0))
 
 
-def summarize_episodes(episode_results: List[Dict], dt: float = 0.1) -> Dict[str, Optional[float]]:
+def compute_multi_objective_utility(
+    metrics: Dict[str, float],
+    agent_id: str = "agent_1",
+    weights: Optional[Dict[str, float]] = None,
+) -> float:
+    weights = {**DEFAULT_MULTI_OBJECTIVE_WEIGHTS, **(weights or {})}
+    self_reward_key = "avg_reward_1" if agent_id == "agent_1" else "avg_reward_2"
+    other_reward_key = "avg_reward_2" if agent_id == "agent_1" else "avg_reward_1"
+
+    score = 0.0
+    score += weights["success_rate"] * float(metrics.get("success_rate", 0.0))
+    score += weights["collision_rate"] * float(metrics.get("collision_rate", 0.0))
+    score += weights["avg_time_to_clear"] * float(metrics.get("avg_time_to_clear") or 0.0)
+    score += weights["avg_delay"] * float(metrics.get("avg_delay", 0.0))
+    score += weights["min_time_to_collision"] * float(metrics.get("min_time_to_collision", 0.0))
+    score += weights["safety_margin"] * float(metrics.get("safety_margin", 0.0))
+    score += weights["avg_jerk"] * float(metrics.get("avg_jerk", 0.0))
+    score += weights["reward_fairness"] * float(metrics.get("reward_fairness", 0.0))
+    score += weights["avg_reward_self"] * float(metrics.get(self_reward_key, 0.0))
+    score += weights["avg_reward_other"] * float(metrics.get(other_reward_key, 0.0))
+    return float(score)
+
+
+def summarize_episodes(
+    episode_results: List[Dict],
+    dt: float = 0.1,
+    utility_weights: Optional[Dict[str, float]] = None,
+) -> Dict[str, Optional[float]]:
     efficiency = compute_efficiency(episode_results, dt=dt)
     safety = compute_safety_metrics(episode_results)
     smoothness = compute_smoothness_metrics(episode_results, dt=dt)
     fairness = compute_fairness_metrics(episode_results)
     returns = compute_return_stats(episode_results)
-    return {
+    summary = {
         "success_rate": compute_success_rate(episode_results),
         "collision_rate": compute_collision_rate(episode_results),
         **efficiency,
@@ -170,3 +209,13 @@ def summarize_episodes(episode_results: List[Dict], dt: float = 0.1) -> Dict[str
         **fairness,
         **returns,
     }
+    summary["multi_objective_utility_1"] = compute_multi_objective_utility(
+        summary, agent_id="agent_1", weights=utility_weights
+    )
+    summary["multi_objective_utility_2"] = compute_multi_objective_utility(
+        summary, agent_id="agent_2", weights=utility_weights
+    )
+    summary["multi_objective_utility_joint"] = float(
+        0.5 * (summary["multi_objective_utility_1"] + summary["multi_objective_utility_2"])
+    )
+    return summary

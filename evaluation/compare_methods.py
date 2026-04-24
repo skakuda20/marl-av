@@ -103,6 +103,7 @@ def compare_methods(
     env: IntersectionEnv | None = None,
     seed: int = 0,
     scenario_split: str | None = None,
+    utility_weights: Dict[str, float] | None = None,
 ) -> Dict[str, Dict]:
     """
     Evaluate multiple agent pairs and return a metrics table.
@@ -128,7 +129,7 @@ def compare_methods(
             seed=seed + idx * 1000,
             scenario_split=scenario_split,
         )
-        all_results[label] = summarize_episodes(episodes, dt=env.dt)
+        all_results[label] = summarize_episodes(episodes, dt=env.dt, utility_weights=utility_weights)
 
     _print_table(all_results)
     return all_results
@@ -141,6 +142,7 @@ def evaluate_cross_play(
     n_episodes: int = 100,
     seed: int = 0,
     scenario_split: str | None = None,
+    utility_weights: Dict[str, float] | None = None,
 ) -> Dict[str, Dict[str, Dict]]:
     """
     Cross-play agent_1 from each row pair against agent_2 from each column pair.
@@ -158,7 +160,11 @@ def evaluate_cross_play(
                 seed=seed + row_idx * 1000 + col_idx * 17,
                 scenario_split=scenario_split,
             )
-            matrix[row_label][col_label] = summarize_episodes(episodes, dt=env.dt)
+            matrix[row_label][col_label] = summarize_episodes(
+                episodes,
+                dt=env.dt,
+                utility_weights=utility_weights,
+            )
     return matrix
 
 
@@ -171,6 +177,7 @@ def _print_table(results: Dict[str, Dict]) -> None:
         f"{'MinTTC':>8} "
         f"{'Margin':>8} "
         f"{'Jerk':>8}"
+        f" {'MO-U':>8}"
     )
     sep = "-" * len(header)
 
@@ -185,7 +192,8 @@ def _print_table(results: Dict[str, Dict]) -> None:
             f"{m['collision_rate']:>10.2%} "
             f"{m['min_time_to_collision']:>8.2f} "
             f"{m['safety_margin']:>8.2f} "
-            f"{m['avg_jerk']:>8.2f}"
+            f"{m['avg_jerk']:>8.2f} "
+            f"{m['multi_objective_utility_joint']:>8.2f}"
         )
 
     print(sep)

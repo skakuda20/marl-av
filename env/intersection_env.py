@@ -13,6 +13,7 @@ from env.rewards import RewardFunction
 from env.scenarios import (
     DEFAULT_SCENARIO_DISTRIBUTIONS,
     ScenarioDistribution,
+    build_scenario_distributions,
     priority_value,
     sample_scenario,
 )
@@ -44,6 +45,7 @@ class IntersectionEnv(gym.Env):
         render_mode: Optional[str] = None,
         scenario_split: str = "train",
         scenario_distributions: Optional[Dict[str, ScenarioDistribution]] = None,
+        localize_observations: bool = True,
     ):
         """
         Initialize the intersection environment.
@@ -61,7 +63,8 @@ class IntersectionEnv(gym.Env):
         self.goal_threshold = goal_threshold
         self.render_mode = render_mode
         self.scenario_split = scenario_split
-        self.scenario_distributions = scenario_distributions or DEFAULT_SCENARIO_DISTRIBUTIONS
+        self.scenario_distributions = build_scenario_distributions(scenario_distributions) if isinstance(scenario_distributions, dict) else (scenario_distributions or DEFAULT_SCENARIO_DISTRIBUTIONS)
+        self.localize_observations = localize_observations
         
         # Initialize dynamics and rewards
         self.dynamics = VehicleDynamics(dt=dt)
@@ -102,6 +105,32 @@ class IntersectionEnv(gym.Env):
         self._prev_goal_dist_1: float = 0.0
         self._prev_goal_dist_2: float = 0.0
         self.current_scenario: Optional[Dict[str, object]] = None
+
+    def _scenario_center(self) -> np.ndarray:
+        if self.current_scenario is None:
+            return np.zeros(2, dtype=np.float32)
+        return np.array(self.current_scenario.get("center", (0.0, 0.0)), dtype=np.float32)
+
+    def _localize_state(self, state: np.ndarray) -> np.ndarray:
+        localized = np.array(state, dtype=np.float32, copy=True)
+        if self.localize_observations:
+            localized[:2] -= self._scenario_center()
+        return localized
+
+    def _apply_other_agent_noise(self, obs: np.ndarray) -> np.ndarray:
+        noisy = np.array(obs, dtype=np.float32, copy=True)
+        noise_std = float(self.current_scenario.get("observation_noise_std", 0.0))
+        occlusion_probability = float(self.current_scenario.get("occlusion_probability", 0.0))
+
+        if noise_std > 0.0:
+            noisy[4:8] += self.np_random.normal(0.0, noise_std, size=4).astype(np.float32)
+            noisy[9] = max(0.0, float(noisy[9] + self.np_random.normal(0.0, noise_std * 2.0)))
+
+        if occlusion_probability > 0.0 and float(self.np_random.random()) < occlusion_probability:
+            noisy[4:8] = 0.0
+            noisy[9] = max(noisy[9], 20.0)
+
+        return noisy
         
     def reset(
         self, 
@@ -243,13 +272,15 @@ class IntersectionEnv(gym.Env):
         
         priority_1 = priority_value(self.current_scenario["priority"], "agent_1")
         priority_2 = priority_value(self.current_scenario["priority"], "agent_2")
+        state_1_obs = self._localize_state(self.state_1)
+        state_2_obs = self._localize_state(self.state_2)
 
         # Agent 1 observation: own state + other state + distances
         obs_1 = np.array([
-            self.state_1[0], self.state_1[1],  # own position
-            self.state_1[2], self.state_1[3],  # own velocity
-            self.state_2[0], self.state_2[1],  # other position
-            self.state_2[2], self.state_2[3],  # other velocity
+            state_1_obs[0], state_1_obs[1],  # own position
+            state_1_obs[2], state_1_obs[3],  # own velocity
+            state_2_obs[0], state_2_obs[1],  # other position
+            state_2_obs[2], state_2_obs[3],  # other velocity
             dist_to_goal_1,  # distance to own goal
             dist_between,     # distance to other vehicle
             priority_1,       # own priority hint
@@ -257,16 +288,19 @@ class IntersectionEnv(gym.Env):
         
         # Agent 2 observation: own state + other state + distances
         obs_2 = np.array([
-            self.state_2[0], self.state_2[1],  # own position
-            self.state_2[2], self.state_2[3],  # own velocity
-            self.state_1[0], self.state_1[1],  # other position
-            self.state_1[2], self.state_1[3],  # other velocity
+            state_2_obs[0], state_2_obs[1],  # own position
+            state_2_obs[2], state_2_obs[3],  # own velocity
+            state_1_obs[0], state_1_obs[1],  # other position
+            state_1_obs[2], state_1_obs[3],  # other velocity
             dist_to_goal_2,  # distance to own goal
             dist_between,     # distance to other vehicle
             priority_2,       # own priority hint
         ], dtype=np.float32)
-        
-        return {"agent_1": obs_1, "agent_2": obs_2}
+
+        return {
+            "agent_1": self._apply_other_agent_noise(obs_1),
+            "agent_2": self._apply_other_agent_noise(obs_2),
+        }
     
     def _get_info(self) -> Dict:
         """Get additional information."""

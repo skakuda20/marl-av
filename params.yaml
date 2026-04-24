@@ -4,6 +4,30 @@ env:
   dt: 0.1
   max_steps: 400
   goal_threshold: 2.0
+  localize_observations: true
+  scenario_distributions:
+    train:
+      spawn_distance_range: [18.0, 24.0]
+      initial_speed_range: [6.5, 9.5]
+      arrival_offset_range: [-1.25, 1.25]
+      center_offset_range: [-1.5, 1.5]
+      priority_probs: {balanced: 0.4, agent_1: 0.3, agent_2: 0.3}
+      geometry_probs: {standard: 0.6, offset_narrow: 0.2, offset_wide: 0.2}
+      lane_offset_range: [-1.0, 1.0]
+      observation_noise_std: 0.02
+      occlusion_probability: 0.0
+      speed_noise_std: 0.15
+    test:
+      spawn_distance_range: [18.0, 34.0]
+      initial_speed_range: [3.0, 13.5]
+      arrival_offset_range: [-0.4, 0.4]
+      center_offset_range: [-4.0, 4.0]
+      priority_probs: {balanced: 0.1, agent_1: 0.45, agent_2: 0.45}
+      geometry_probs: {standard: 0.35, offset_narrow: 0.3, offset_wide: 0.35}
+      lane_offset_range: [-3.0, 3.0]
+      observation_noise_std: 0.2
+      occlusion_probability: 0.18
+      speed_noise_std: 0.65
 
 rewards:
   collision_penalty: -100.0
@@ -14,7 +38,7 @@ rewards:
   progress_weight: 0.1
 
 svo:
-  agent_1_degrees: 45.0
+  agent_1_degrees: 15.0
   agent_2_degrees: 0.0
 
 q_learning:
@@ -37,9 +61,20 @@ evaluation:
     - ["priority", "yield"]
   unseen_mixture_policies: ["aggressive", "cautious", "yield", "priority"]
   game_baseline_candidates: ["constant", "cautious", "aggressive", "yield", "priority"]
+  multi_objective_weights:
+    success_rate: 100.0
+    collision_rate: -120.0
+    avg_time_to_clear: -2.5
+    avg_delay: -1.0
+    min_time_to_collision: 6.0
+    safety_margin: 3.0
+    avg_jerk: -1.5
+    reward_fairness: 20.0
+    avg_reward_self: 0.2
+    avg_reward_other: 0.05
 
 ablations:
-  svo_angles_degrees: [0.0, 22.5, 45.0, 67.5]
+  asymmetric_svo_angles_degrees: [5.0, 10.0, 15.0, 20.0, 22.5, 30.0, 45.0]
 
 seeds: [0, 1, 2]
 

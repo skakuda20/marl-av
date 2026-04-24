@@ -41,6 +41,8 @@ def _env_kwargs(params: dict, scenario_split: str) -> Dict[str, Any]:
         "max_steps": env_cfg["max_steps"],
         "goal_threshold": env_cfg["goal_threshold"],
         "scenario_split": scenario_split,
+        "scenario_distributions": env_cfg.get("scenario_distributions"),
+        "localize_observations": env_cfg.get("localize_observations", True),
     }
 
 
@@ -79,11 +81,15 @@ def _aggregate_numeric(values: List[Any]) -> Any:
     return first
 
 
+def _utility_weights(params: dict) -> Dict[str, float]:
+    return params.get("evaluation", {}).get("multi_objective_weights", {})
+
+
 def _ablation_configs(params: dict) -> List[Dict[str, Any]]:
     base_svo = params["svo"]
     ab_cfg = params.get("ablations", {})
-    angle_list = ab_cfg.get("svo_angles_degrees", [0.0, 22.5, 45.0])
-    return [
+    angle_list = ab_cfg.get("asymmetric_svo_angles_degrees", [5.0, 10.0, 15.0, 20.0, 22.5, 30.0, 45.0])
+    configs = [
         {
             "label": "selfish_vs_selfish",
             "agent_1_degrees": 0.0,
@@ -91,33 +97,40 @@ def _ablation_configs(params: dict) -> List[Dict[str, Any]]:
             "use_svo": True,
         },
         {
-            "label": "prosocial_vs_prosocial",
-            "agent_1_degrees": 45.0,
-            "agent_2_degrees": 45.0,
-            "use_svo": True,
-        },
-        {
-            "label": "asymmetric_prosocial_selfish",
-            "agent_1_degrees": 45.0,
+            "label": "non_svo_rl_baseline",
+            "agent_1_degrees": 0.0,
             "agent_2_degrees": 0.0,
-            "use_svo": True,
-        },
-        {
-            "label": "base_no_svo",
-            "agent_1_degrees": base_svo["agent_1_degrees"],
-            "agent_2_degrees": base_svo["agent_2_degrees"],
             "use_svo": False,
         },
-        *[
+    ]
+
+    main_angle = float(base_svo["agent_1_degrees"])
+    agent_2_angle = float(base_svo.get("agent_2_degrees", 0.0))
+    if main_angle > 0.0:
+        configs.append(
             {
-                "label": f"svo_sweep_{angle:g}",
-                "agent_1_degrees": angle,
-                "agent_2_degrees": angle,
+                "label": "asymmetric_svo_main",
+                "agent_1_degrees": main_angle,
+                "agent_2_degrees": agent_2_angle,
                 "use_svo": True,
             }
-            for angle in angle_list
-        ],
-    ]
+        )
+
+    seen = {cfg["label"] for cfg in configs}
+    for angle in angle_list:
+        label = f"asymmetric_svo_{angle:g}"
+        if angle == 0.0 or label in seen:
+            continue
+        configs.append(
+            {
+                "label": label,
+                "agent_1_degrees": float(angle),
+                "agent_2_degrees": 0.0,
+                "use_svo": True,
+            }
+        )
+        seen.add(label)
+    return configs
 
 
 def _opponent_pairs(params: dict) -> Dict[str, Tuple[Any, Any]]:
@@ -134,7 +147,67 @@ def _opponent_pairs(params: dict) -> Dict[str, Tuple[Any, Any]]:
         create_heuristic_agent("agent_1", "priority"),
         MixtureAgent("agent_2", mixture_policies),
     )
+    pairs["mixed_population_pair"] = (
+        MixtureAgent("agent_1", ["priority", "cautious"]),
+        MixtureAgent("agent_2", mixture_policies),
+    )
     return pairs
+
+
+def _game_theoretic_pairs(
+    params: dict,
+    env: IntersectionEnv,
+    n_episodes: int,
+    utility_weights: Dict[str, float],
+) -> Tuple[Dict[str, Tuple[Any, Any]], Dict[str, Any]]:
+    eval_cfg = params["evaluation"]
+    nash = approximate_nash_equilibrium(
+        env=deepcopy(env),
+        n_episodes=n_episodes,
+        candidate_policies=eval_cfg.get(
+            "game_baseline_candidates",
+            ["constant", "cautious", "aggressive", "yield", "priority"],
+        ),
+        utility_weights=utility_weights,
+    )
+    approx_nash_pair = (
+        create_heuristic_agent("agent_1", nash.policy_1),
+        create_heuristic_agent("agent_2", nash.policy_2),
+    )
+    br_1, br_scores_1 = empirical_best_response(
+        env=deepcopy(env),
+        opponent_policy=nash.policy_2,
+        agent_id="agent_1",
+        n_episodes=n_episodes,
+        utility_weights=utility_weights,
+    )
+    br_2, br_scores_2 = empirical_best_response(
+        env=deepcopy(env),
+        opponent_policy=nash.policy_1,
+        agent_id="agent_2",
+        n_episodes=n_episodes,
+        utility_weights=utility_weights,
+    )
+    pairs = {
+        "approx_nash": approx_nash_pair,
+        "empirical_best_response": (br_1, br_2),
+    }
+    metadata = {
+        "approx_nash": {
+            "policy_1": nash.policy_1,
+            "policy_2": nash.policy_2,
+            "payoff_1": nash.payoff_1,
+            "payoff_2": nash.payoff_2,
+            "exploitability": nash.exploitability,
+        },
+        "empirical_best_response": {
+            "policy_1": br_1.label,
+            "policy_2": br_2.label,
+            "candidate_scores_1": br_scores_1,
+            "candidate_scores_2": br_scores_2,
+        },
+    }
+    return pairs, metadata
 
 
 def train_one_seed(params: dict, config: Dict[str, Any], seed: int):
@@ -180,9 +253,12 @@ def evaluate_one_seed(
     agent_1,
     agent_2,
     rl_opponents: Dict[str, Tuple[Any, Any]],
+    baseline_pairs: Dict[str, Tuple[Any, Any]],
+    baseline_metadata: Dict[str, Any],
 ) -> Dict[str, Any]:
     eval_cfg = params["evaluation"]
     n_eval = eval_cfg["num_eval_episodes"]
+    utility_weights = _utility_weights(params)
     seen_env = _make_env(params, "train")
     unseen_env = _make_env(params, "test")
 
@@ -192,12 +268,12 @@ def evaluate_one_seed(
     unseen_episodes = run_eval_episodes(
         agent_1, agent_2, deepcopy(unseen_env), n_episodes=n_eval, seed=seed, scenario_split="test"
     )
-    seen_metrics = summarize_episodes(seen_episodes, dt=seen_env.dt)
-    unseen_metrics = summarize_episodes(unseen_episodes, dt=unseen_env.dt)
+    seen_metrics = summarize_episodes(seen_episodes, dt=seen_env.dt, utility_weights=utility_weights)
+    unseen_metrics = summarize_episodes(unseen_episodes, dt=unseen_env.dt, utility_weights=utility_weights)
 
     heuristic_opponents = _opponent_pairs(params)
     row_agents = {config["label"]: (agent_1, agent_2)}
-    col_agents = {**heuristic_opponents, **rl_opponents}
+    col_agents = {**heuristic_opponents, **baseline_pairs, **rl_opponents}
     cross_seen = evaluate_cross_play(
         row_agents=row_agents,
         col_agents=col_agents,
@@ -205,6 +281,7 @@ def evaluate_one_seed(
         n_episodes=n_eval,
         seed=seed,
         scenario_split="train",
+        utility_weights=utility_weights,
     )
     cross_unseen = evaluate_cross_play(
         row_agents=row_agents,
@@ -213,6 +290,7 @@ def evaluate_one_seed(
         n_episodes=n_eval,
         seed=seed,
         scenario_split="test",
+        utility_weights=utility_weights,
     )
 
     regret = {}
@@ -220,30 +298,28 @@ def evaluate_one_seed(
         if "_vs_" not in opponent_name:
             continue
         opponent_policy = opponent_name.split("_vs_")[-1]
-        br = _best_response_summary(deepcopy(unseen_env), opponent_policy, n_eval)
-        trained_payoff = cross_unseen[config["label"]][opponent_name]["avg_reward_1"]
+        br_agent, scores = empirical_best_response(
+            env=deepcopy(unseen_env),
+            opponent_policy=opponent_policy,
+            n_episodes=n_eval,
+            utility_weights=utility_weights,
+        )
+        best_response_value = max(scores.values())
+        trained_payoff = cross_unseen[config["label"]][opponent_name]["multi_objective_utility_1"]
         regret[opponent_name] = {
-            "best_response_policy": br["policy"],
-            "best_response_value": max(br["candidate_scores"].values()),
+            "best_response_policy": br_agent.label,
+            "best_response_value": best_response_value,
             "trained_value": trained_payoff,
-            "regret": max(br["candidate_scores"].values()) - trained_payoff,
+            "regret": best_response_value - trained_payoff,
         }
-
-    nash = approximate_nash_equilibrium(
-        env=deepcopy(unseen_env),
-        n_episodes=n_eval,
-        candidate_policies=eval_cfg.get(
-            "game_baseline_candidates",
-            ["constant", "cautious", "aggressive", "yield", "priority"],
-        ),
-    )
 
     heuristic_results = compare_methods(
         num_eval_episodes=n_eval,
-        method_dict=heuristic_opponents,
+        method_dict={**heuristic_opponents, **baseline_pairs},
         env=deepcopy(unseen_env),
         seed=seed,
         scenario_split="test",
+        utility_weights=utility_weights,
     )
 
     return {
@@ -260,15 +336,61 @@ def evaluate_one_seed(
         "cross_play_unseen": cross_unseen,
         "regret_against_fixed_opponents": regret,
         "game_theoretic_baselines": {
-            "approx_nash": {
-                "policy_1": nash.policy_1,
-                "policy_2": nash.policy_2,
-                "payoff_1": nash.payoff_1,
-                "payoff_2": nash.payoff_2,
-                "exploitability": nash.exploitability,
-            },
+            **baseline_metadata,
             "heuristic_baselines": heuristic_results,
         },
+    }
+
+
+def _evaluate_method_tables_for_seed(
+    params: dict,
+    seed: int,
+    trained_agents: Dict[str, Tuple[Any, Any]],
+) -> Dict[str, Any]:
+    utility_weights = _utility_weights(params)
+    n_eval = params["evaluation"]["num_eval_episodes"]
+    unseen_env = _make_env(params, "test")
+    seen_env = _make_env(params, "train")
+    heuristic_pairs = _opponent_pairs(params)
+    game_pairs, game_metadata = _game_theoretic_pairs(params, unseen_env, n_eval, utility_weights)
+    method_pairs = {**trained_agents, **heuristic_pairs, **game_pairs}
+
+    return {
+        "method_comparison_seen": compare_methods(
+            num_eval_episodes=n_eval,
+            method_dict=method_pairs,
+            env=deepcopy(seen_env),
+            seed=seed,
+            scenario_split="train",
+            utility_weights=utility_weights,
+        ),
+        "method_comparison_unseen": compare_methods(
+            num_eval_episodes=n_eval,
+            method_dict=method_pairs,
+            env=deepcopy(unseen_env),
+            seed=seed,
+            scenario_split="test",
+            utility_weights=utility_weights,
+        ),
+        "cross_play_seen_full": evaluate_cross_play(
+            row_agents=method_pairs,
+            col_agents=method_pairs,
+            env=deepcopy(seen_env),
+            n_episodes=n_eval,
+            seed=seed,
+            scenario_split="train",
+            utility_weights=utility_weights,
+        ),
+        "cross_play_unseen_full": evaluate_cross_play(
+            row_agents=method_pairs,
+            col_agents=method_pairs,
+            env=deepcopy(unseen_env),
+            n_episodes=n_eval,
+            seed=seed,
+            scenario_split="test",
+            utility_weights=utility_weights,
+        ),
+        "game_theoretic_reference": game_metadata,
     }
 
 
@@ -298,6 +420,7 @@ def main():
     configs = _ablation_configs(params)
 
     all_seed_results: Dict[str, List[Dict[str, Any]]] = {cfg["label"]: [] for cfg in configs}
+    direct_eval_per_seed: List[Dict[str, Any]] = []
     trained_agents_by_seed: Dict[int, Dict[str, Tuple[Any, Any]]] = {}
     train_metrics_by_config: Dict[str, List[Dict[str, Any]]] = {cfg["label"]: [] for cfg in configs}
 
@@ -308,6 +431,13 @@ def main():
             agent_1, agent_2, train_metrics = train_one_seed(params, config, seed)
             trained_agents_by_seed[seed][config["label"]] = (agent_1, agent_2)
             train_metrics_by_config[config["label"]].append(train_metrics)
+
+        baseline_pairs, baseline_metadata = _game_theoretic_pairs(
+            params=params,
+            env=_make_env(params, "test"),
+            n_episodes=params["evaluation"]["num_eval_episodes"],
+            utility_weights=_utility_weights(params),
+        )
 
         for config in configs:
             rl_opponents = {
@@ -324,8 +454,18 @@ def main():
                 agent_1=agent_1,
                 agent_2=agent_2,
                 rl_opponents=rl_opponents,
+                baseline_pairs=baseline_pairs,
+                baseline_metadata=baseline_metadata,
             )
             all_seed_results[config["label"]].append(seed_result)
+
+        direct_eval_per_seed.append(
+            _evaluate_method_tables_for_seed(
+                params=params,
+                seed=seed,
+                trained_agents=trained_agents_by_seed[seed],
+            )
+        )
 
     aggregate_results = {
         label: {
@@ -340,6 +480,10 @@ def main():
         "seeds": seeds,
         "per_seed": all_seed_results,
         "aggregate": aggregate_results,
+        "direct_method_evaluation": {
+            "per_seed": direct_eval_per_seed,
+            "aggregate": _aggregate_numeric(direct_eval_per_seed),
+        },
     }
     save_outputs(final_results, params)
 

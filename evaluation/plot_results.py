@@ -421,7 +421,7 @@ def run_svo_sweep(
 
 def plot_svo_vs_nosvo(
     save_dir: str = SAVE_DIR,
-    n_train: int = 5000,
+    n_train: int = 2000,
     n_eval: int = 200,
     overwrite: bool = False,
 ) -> None:

@@ -35,7 +35,7 @@ _STATES_PER_AGENT = 5 * 5 * 4 * 3  # 300
 NUM_STATES = _STATES_PER_AGENT * 2  # 600
 
 
-def _discretize_obs(obs: np.ndarray, agent_index: int) -> int:
+def _discretize_obs(obs: np.ndarray, agent_index: int = 0) -> int:
     """
     Map a continuous observation to an integer state index.
 

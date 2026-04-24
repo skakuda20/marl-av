@@ -4,7 +4,7 @@ These provide simple baseline behaviors for autonomous vehicles.
 """
 
 import numpy as np
-from typing import Tuple
+from typing import List, Tuple
 
 
 class HeuristicAgent:
@@ -207,29 +207,93 @@ class YieldAgent(HeuristicAgent):
         return action
 
 
-def create_heuristic_pair(
-    policy_1: str = "constant",
-    policy_2: str = "cautious"
-) -> Tuple[HeuristicAgent, HeuristicAgent]:
+class PriorityAgent(HeuristicAgent):
+    """Agent that uses the scenario priority hint to decide whether to yield."""
+
+    def __init__(
+        self,
+        agent_id: str,
+        priority_speed: float = 10.0,
+        yield_speed: float = 4.0,
+        approach_zone: float = 16.0,
+    ):
+        super().__init__(agent_id)
+        self.priority_speed = priority_speed
+        self.yield_speed = yield_speed
+        self.approach_zone = approach_zone
+
+    def get_action(self, observation: np.ndarray) -> float:
+        own_x, own_y = observation[0], observation[1]
+        vx, vy = observation[2], observation[3]
+        current_speed = np.sqrt(vx**2 + vy**2)
+        distance_to_other = observation[9]
+        priority_hint = observation[10] if len(observation) > 10 else 0.0
+
+        own_dist_to_intersection = np.sqrt(own_x**2 + own_y**2)
+        target_speed = self.priority_speed
+
+        if priority_hint < 0.0 and own_dist_to_intersection < self.approach_zone:
+            target_speed = self.yield_speed
+            if distance_to_other < 8.0:
+                target_speed = 0.0
+        elif priority_hint == 0.0 and distance_to_other < 6.0:
+            target_speed = min(target_speed, 6.0)
+
+        speed_error = target_speed - current_speed
+        return float(np.clip(speed_error / 5.0, -1.0, 1.0))
+
+
+class BestResponseAgent(HeuristicAgent):
     """
-    Create a pair of heuristic agents for testing.
-    
-    Args:
-        policy_1: Policy type for agent 1 
-                  ("constant", "cautious", "aggressive", "yield")
-        policy_2: Policy type for agent 2
-    
-    Returns:
-        Tuple of (agent_1, agent_2)
+    Policy wrapper produced by empirical best-response search.
+
+    It forwards decisions to the selected underlying heuristic.
     """
+
+    def __init__(self, agent_id: str, base_agent: HeuristicAgent, label: str):
+        super().__init__(agent_id)
+        self.base_agent = base_agent
+        self.label = label
+
+    def get_action(self, observation: np.ndarray) -> float:
+        return self.base_agent.get_action(observation)
+
+
+class MixtureAgent(HeuristicAgent):
+    """Samples one constituent heuristic at the start of each episode."""
+
+    def __init__(self, agent_id: str, policies: List[str]):
+        super().__init__(agent_id)
+        self.policies = list(policies)
+        self._active_agent = create_heuristic_agent(agent_id, self.policies[0])
+
+    def start_episode(self, rng: np.random.Generator) -> None:
+        choice = str(rng.choice(self.policies))
+        self._active_agent = create_heuristic_agent(self.agent_id, choice)
+
+    def get_action(self, observation: np.ndarray) -> float:
+        return self._active_agent.get_action(observation)
+
+
+def create_heuristic_agent(agent_id: str, policy: str) -> HeuristicAgent:
+    """Create a single heuristic or explicit-game baseline agent."""
     policy_map = {
         "constant": ConstantVelocityAgent,
         "cautious": CautiousAgent,
         "aggressive": AggressiveAgent,
-        "yield": YieldAgent
+        "yield": YieldAgent,
+        "priority": PriorityAgent,
     }
-    
-    agent_1 = policy_map[policy_1]("agent_1")
-    agent_2 = policy_map[policy_2]("agent_2")
-    
-    return agent_1, agent_2
+
+    return policy_map[policy](agent_id)
+
+
+def create_heuristic_pair(
+    policy_1: str = "constant",
+    policy_2: str = "cautious"
+) -> Tuple[HeuristicAgent, HeuristicAgent]:
+    """Create a pair of heuristic agents for testing."""
+    return (
+        create_heuristic_agent("agent_1", policy_1),
+        create_heuristic_agent("agent_2", policy_2),
+    )

@@ -1,46 +1,32 @@
 """
 Comparison framework for evaluating and contrasting agent approaches.
-
-Usage
------
-Pass a dict of {label: (agent_1, agent_2)} to compare_methods().
-Agents can be any object with a get_action(obs) method —
-HeuristicAgent instances from agents.heuristic or trained RLAgent
-instances from agents.rl_agent both work.
-
-Example
--------
-    from agents.heuristic import create_heuristic_pair
-    from training.train_rl import train_rl_agent
-    from env.rewards import SVO_PROSOCIAL, SVO_SELFISH
-    from evaluation.compare_methods import compare_methods
-
-    rl_1, rl_2, _ = train_rl_agent(num_episodes=2000, verbose=False)
-
-    results = compare_methods(
-        num_eval_episodes=200,
-        method_dict={
-            "cautious vs aggressive": create_heuristic_pair("cautious", "aggressive"),
-            "yield vs constant":      create_heuristic_pair("yield", "constant"),
-            "RL (prosocial vs selfish)": (rl_1, rl_2),
-        },
-    )
 """
 
-import sys
+from __future__ import annotations
+
 import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import sys
+from copy import deepcopy
+from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
-from typing import Dict, List, Tuple, Any
 
-from env.intersection_env import IntersectionEnv
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from agents.heuristic import create_heuristic_pair
-from evaluation.metrics import (
-    compute_success_rate,
-    compute_collision_rate,
-    compute_efficiency,
-)
+from env.intersection_env import IntersectionEnv
+from evaluation.metrics import summarize_episodes
+
+
+def _clone_env(env: IntersectionEnv) -> IntersectionEnv:
+    return deepcopy(env)
+
+
+def _get_action(agent: Any, obs: np.ndarray) -> float:
+    try:
+        return float(agent.get_action(obs, training=False))
+    except TypeError:
+        return float(agent.get_action(obs))
 
 
 def run_eval_episodes(
@@ -48,127 +34,143 @@ def run_eval_episodes(
     agent_2: Any,
     env: IntersectionEnv,
     n_episodes: int = 100,
+    seed: int = 0,
+    scenario_split: str | None = None,
 ) -> List[Dict]:
     """
-    Run n_episodes greedy evaluation episodes and return per-episode results.
-
-    Both HeuristicAgent (get_action(obs)) and RLAgent
-    (get_action(obs, training=False)) are supported; the call always uses
-    training=False where applicable.
-
-    Args:
-        agent_1: Agent for vehicle 1.
-        agent_2: Agent for vehicle 2.
-        env: Intersection environment instance.
-        n_episodes: Number of episodes to run.
-
-    Returns:
-        List of dicts with keys:
-            collision, done_1, done_2, steps,
-            total_reward_1, total_reward_2.
+    Run evaluation episodes and return rich per-episode traces.
     """
     results = []
 
-    for _ in range(n_episodes):
-        obs, _ = env.reset()
+    for episode_idx in range(n_episodes):
+        reset_options = {}
+        if scenario_split is not None:
+            reset_options["scenario_split"] = scenario_split
+
+        if episode_idx == 0:
+            obs, info = env.reset(seed=seed, options=reset_options or None)
+        else:
+            obs, info = env.reset(options=reset_options or None)
+
+        if hasattr(agent_1, "start_episode"):
+            agent_1.start_episode(env.np_random)
+        if hasattr(agent_2, "start_episode"):
+            agent_2.start_episode(env.np_random)
+
         total_r1 = 0.0
         total_r2 = 0.0
         terminated = False
         truncated = False
+        states_1 = [info["state_1"].copy().tolist()]
+        states_2 = [info["state_2"].copy().tolist()]
+        actions_1: List[float] = []
+        actions_2: List[float] = []
 
         while not (terminated or truncated):
-            # Support both HeuristicAgent (1-arg) and RLAgent (training kwarg)
-            try:
-                a1 = agent_1.get_action(obs["agent_1"], training=False)
-            except TypeError:
-                a1 = agent_1.get_action(obs["agent_1"])
+            a1 = _get_action(agent_1, obs["agent_1"])
+            a2 = _get_action(agent_2, obs["agent_2"])
+            actions_1.append(a1)
+            actions_2.append(a2)
 
-            try:
-                a2 = agent_2.get_action(obs["agent_2"], training=False)
-            except TypeError:
-                a2 = agent_2.get_action(obs["agent_2"])
-
-            obs, reward, terminated, truncated, info = env.step(
-                np.array([a1, a2])
-            )
+            obs, reward, terminated, truncated, info = env.step(np.array([a1, a2]))
             total_r1 += reward["agent_1"]
             total_r2 += reward["agent_2"]
+            states_1.append(info["state_1"].copy().tolist())
+            states_2.append(info["state_2"].copy().tolist())
 
-        results.append({
-            "collision": bool(info.get("collision", False)),
-            "done_1":    bool(info.get("done_1", False)),
-            "done_2":    bool(info.get("done_2", False)),
-            "steps":     int(info["steps"]),
-            "total_reward_1": float(total_r1),
-            "total_reward_2": float(total_r2),
-        })
+        results.append(
+            {
+                "collision": bool(info.get("collision", False)),
+                "done_1": bool(info.get("done_1", False)),
+                "done_2": bool(info.get("done_2", False)),
+                "steps": int(info["steps"]),
+                "total_reward_1": float(total_r1),
+                "total_reward_2": float(total_r2),
+                "actions_1": actions_1,
+                "actions_2": actions_2,
+                "states_1": states_1,
+                "states_2": states_2,
+                "scenario": info.get("scenario"),
+            }
+        )
 
     return results
 
 
 def compare_methods(
     num_eval_episodes: int = 200,
-    method_dict: Dict[str, Tuple[Any, Any]] = None,
-    env: IntersectionEnv = None,
+    method_dict: Dict[str, Tuple[Any, Any]] | None = None,
+    env: IntersectionEnv | None = None,
+    seed: int = 0,
+    scenario_split: str | None = None,
 ) -> Dict[str, Dict]:
     """
-    Evaluate multiple agent pairs and print a comparison table.
-
-    Args:
-        num_eval_episodes: Episodes per method.
-        method_dict: {label: (agent_1, agent_2)}. Defaults to four
-                     heuristic baseline pairs if omitted.
-        env: Optional pre-configured IntersectionEnv. If None, a default
-             IntersectionEnv() is created. Pass an env when training used
-             non-default params (e.g. max_steps, reward weights).
-
-    Returns:
-        Dict mapping each label to its metrics dict:
-            success_rate, collision_rate, avg_time_to_clear,
-            avg_delay, avg_steps.
+    Evaluate multiple agent pairs and return a metrics table.
     """
     if method_dict is None:
         method_dict = {
-            "constant vs cautious":   create_heuristic_pair("constant", "cautious"),
+            "constant vs cautious": create_heuristic_pair("constant", "cautious"),
             "cautious vs aggressive": create_heuristic_pair("cautious", "aggressive"),
-            "yield vs aggressive":    create_heuristic_pair("yield", "aggressive"),
-            "yield vs cautious":      create_heuristic_pair("yield", "cautious"),
+            "yield vs aggressive": create_heuristic_pair("yield", "aggressive"),
+            "priority vs yield": create_heuristic_pair("priority", "yield"),
         }
 
-    if env is None:
-        env = IntersectionEnv()
-    all_results = {}
+    env = env or IntersectionEnv()
+    all_results: Dict[str, Dict] = {}
 
-    for label, (agent_1, agent_2) in method_dict.items():
-        episodes = run_eval_episodes(agent_1, agent_2, env, n_episodes=num_eval_episodes)
-
-        efficiency = compute_efficiency(episodes)
-        all_results[label] = {
-            "success_rate":      compute_success_rate(episodes),
-            "collision_rate":    compute_collision_rate(episodes),
-            "avg_time_to_clear": efficiency["avg_time_to_clear"],
-            "avg_delay":         efficiency["avg_delay"],
-            "avg_steps":         efficiency["avg_steps"],
-        }
+    for idx, (label, (agent_1, agent_2)) in enumerate(method_dict.items()):
+        eval_env = _clone_env(env)
+        episodes = run_eval_episodes(
+            agent_1,
+            agent_2,
+            eval_env,
+            n_episodes=num_eval_episodes,
+            seed=seed + idx * 1000,
+            scenario_split=scenario_split,
+        )
+        all_results[label] = summarize_episodes(episodes, dt=env.dt)
 
     _print_table(all_results)
     return all_results
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
+def evaluate_cross_play(
+    row_agents: Dict[str, Tuple[Any, Any]],
+    col_agents: Dict[str, Tuple[Any, Any]],
+    env: IntersectionEnv,
+    n_episodes: int = 100,
+    seed: int = 0,
+    scenario_split: str | None = None,
+) -> Dict[str, Dict[str, Dict]]:
+    """
+    Cross-play agent_1 from each row pair against agent_2 from each column pair.
+    """
+    matrix: Dict[str, Dict[str, Dict]] = {}
+    for row_idx, (row_label, (row_agent_1, _)) in enumerate(row_agents.items()):
+        matrix[row_label] = {}
+        for col_idx, (col_label, (_, col_agent_2)) in enumerate(col_agents.items()):
+            eval_env = _clone_env(env)
+            episodes = run_eval_episodes(
+                row_agent_1,
+                col_agent_2,
+                eval_env,
+                n_episodes=n_episodes,
+                seed=seed + row_idx * 1000 + col_idx * 17,
+                scenario_split=scenario_split,
+            )
+            matrix[row_label][col_label] = summarize_episodes(episodes, dt=env.dt)
+    return matrix
+
 
 def _print_table(results: Dict[str, Dict]) -> None:
     col_w = max(len(label) for label in results) + 2
-
     header = (
         f"{'Method':<{col_w}} "
         f"{'Success':>8} "
         f"{'Collision':>10} "
-        f"{'T-clear(s)':>11} "
-        f"{'Delay(s)':>9} "
-        f"{'AvgSteps':>9}"
+        f"{'MinTTC':>8} "
+        f"{'Margin':>8} "
+        f"{'Jerk':>8}"
     )
     sep = "-" * len(header)
 
@@ -177,19 +179,13 @@ def _print_table(results: Dict[str, Dict]) -> None:
     print(sep)
 
     for label, m in results.items():
-        t_clear = f"{m['avg_time_to_clear']:.2f}" if m["avg_time_to_clear"] is not None else "  N/A"
         print(
             f"{label:<{col_w}} "
             f"{m['success_rate']:>8.2%} "
             f"{m['collision_rate']:>10.2%} "
-            f"{t_clear:>11} "
-            f"{m['avg_delay']:>9.2f} "
-            f"{m['avg_steps']:>9.1f}"
+            f"{m['min_time_to_collision']:>8.2f} "
+            f"{m['safety_margin']:>8.2f} "
+            f"{m['avg_jerk']:>8.2f}"
         )
 
     print(sep)
-
-
-if __name__ == "__main__":
-    print(f"Evaluating heuristic baselines (200 episodes each)...\n")
-    compare_methods(num_eval_episodes=200)

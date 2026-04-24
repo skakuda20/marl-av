@@ -1,115 +1,72 @@
-"""Quick test to validate the environment implementation."""
+"""Basic validation tests for the current marl-av codebase."""
 
-import sys
 import numpy as np
-from env.intersection_env import IntersectionEnv
+
 from agents.heuristic import create_heuristic_pair
+from env.intersection_env import IntersectionEnv
 
 
 def test_environment():
-    """Test basic environment functionality."""
-    print("Testing IntersectionEnv...")
-    
-    # Create environment
     env = IntersectionEnv(dt=0.1, max_steps=50)
-    
-    # Test reset
-    obs, info = env.reset()
-    assert "agent_1" in obs
-    assert "agent_2" in obs
-    assert obs["agent_1"].shape == (10,)
-    assert obs["agent_2"].shape == (10,)
-    print("✓ Environment reset successful")
-    
-    # Test step
-    action = np.array([0.0, 0.0])
-    obs, reward, terminated, truncated, info = env.step(action)
-    assert "agent_1" in reward
-    assert "agent_2" in reward
-    print("✓ Environment step successful")
-    
-    # Test episode
-    obs, info = env.reset()
-    for _ in range(10):
-        action = np.array([0.5, 0.5])
-        obs, reward, terminated, truncated, info = env.step(action)
-        if terminated or truncated:
-            break
-    print("✓ Episode execution successful")
-    
-    print("\nEnvironment test passed!")
+
+    obs, info = env.reset(seed=7)
+    assert "agent_1" in obs and "agent_2" in obs
+    assert obs["agent_1"].shape == (11,)
+    assert obs["agent_2"].shape == (11,)
+    assert info["scenario"]["scenario_split"] == "train"
+
+    obs, reward, terminated, truncated, info = env.step(np.array([0.0, 0.0]))
+    assert "agent_1" in reward and "agent_2" in reward
+    assert isinstance(terminated, bool)
+    assert isinstance(truncated, bool)
+    assert "scenario" in info
 
 
 def test_heuristic_agents():
-    """Test heuristic agents."""
-    print("\nTesting Heuristic Agents...")
-    
     env = IntersectionEnv()
-    agent_1, agent_2 = create_heuristic_pair("cautious", "cautious")
-    
-    obs, info = env.reset()
-    
-    # Test action generation
+    agent_1, agent_2 = create_heuristic_pair("priority", "yield")
+    obs, _ = env.reset(seed=3)
+
     action_1 = agent_1.get_action(obs["agent_1"])
     action_2 = agent_2.get_action(obs["agent_2"])
-    
     assert -1.0 <= action_1 <= 1.0
     assert -1.0 <= action_2 <= 1.0
-    print("✓ Heuristic agents generate valid actions")
-    
-    # Run short episode
+
     for _ in range(10):
-        action_1 = agent_1.get_action(obs["agent_1"])
-        action_2 = agent_2.get_action(obs["agent_2"])
-        action = np.array([action_1, action_2])
-        obs, reward, terminated, truncated, info = env.step(action)
+        obs, reward, terminated, truncated, info = env.step(np.array([action_1, action_2]))
         if terminated or truncated:
             break
-    
-    print("✓ Heuristic agents can control environment")
-    print("\nHeuristic agents test passed!")
+        action_1 = agent_1.get_action(obs["agent_1"])
+        action_2 = agent_2.get_action(obs["agent_2"])
 
 
-def test_collision_detection():
-    """Test collision detection."""
-    print("\nTesting Collision Detection...")
-    
-    from env.dynamics import VehicleDynamics
-    
-    dynamics = VehicleDynamics()
-    
-    # Test no collision
-    state1 = np.array([0.0, 0.0, 1.0, 0.0])
-    state2 = np.array([10.0, 0.0, 1.0, 0.0])
-    assert not dynamics.check_collision(state1, state2)
-    print("✓ Correctly detects no collision")
-    
-    # Test collision
-    state1 = np.array([0.0, 0.0, 1.0, 0.0])
-    state2 = np.array([1.0, 0.0, -1.0, 0.0])
-    assert dynamics.check_collision(state1, state2)
-    print("✓ Correctly detects collision")
-    
-    print("\nCollision detection test passed!")
+def test_goal_reward_awarded_once():
+    env = IntersectionEnv(max_steps=5)
+    scenario = {
+        "priority": "balanced",
+        "center": (0.0, 0.0),
+        "spawn_distance_1": 1.0,
+        "spawn_distance_2": 1.0,
+        "initial_speed_1": 0.0,
+        "initial_speed_2": 0.0,
+        "arrival_offset": 0.0,
+        "start_pos_1": np.array([0.0, 0.0], dtype=np.float32),
+        "goal_pos_1": (0.0, 0.0),
+        "start_vel_1": np.array([0.0, 0.0], dtype=np.float32),
+        "start_pos_2": np.array([5.0, 5.0], dtype=np.float32),
+        "goal_pos_2": (5.0, 5.0),
+        "start_vel_2": np.array([0.0, 0.0], dtype=np.float32),
+    }
+    env.reset(options={"scenario": scenario})
+    _, reward_1, _, _, info_1 = env.step(np.array([0.0, 0.0]))
+    _, reward_2, _, _, info_2 = env.step(np.array([0.0, 0.0]))
+    assert info_1["reached_goal_1"] is True
+    assert info_2["reached_goal_1"] is False
+    assert reward_1["agent_1"] > reward_2["agent_1"]
 
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("RUNNING VALIDATION TESTS")
-    print("=" * 60)
-    
-    try:
-        test_environment()
-        test_heuristic_agents()
-        test_collision_detection()
-        
-        print("\n" + "=" * 60)
-        print("ALL TESTS PASSED!")
-        print("=" * 60)
-        print("\nYou can now run: python demo/render_episode.py")
-        
-    except Exception as e:
-        print(f"\n✗ Test failed with error: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    test_environment()
+    test_heuristic_agents()
+    test_goal_reward_awarded_once()
+    print("Basic tests passed.")

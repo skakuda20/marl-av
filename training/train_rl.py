@@ -27,6 +27,11 @@ def train_rl_agent(
     agent_1_svo: float = SVO_PROSOCIAL,
     agent_2_svo: float = SVO_SELFISH,
     use_svo: bool = True,
+    seed: int = 0,
+    env_kwargs: dict = None,
+    reward_kwargs: dict = None,
+    agent_kwargs: dict = None,
+    scenario_split: str = "train",
     save_path: str = None,
     verbose: bool = True,
     log_interval: int = 100,
@@ -53,9 +58,15 @@ def train_rl_agent(
             collision_rate, success_rate, avg_reward_1,
             avg_reward_2, avg_steps.
     """
-    env = IntersectionEnv()
-    agent_1 = RLAgent("agent_1", svo_angle=agent_1_svo)
-    agent_2 = RLAgent("agent_2", svo_angle=agent_2_svo)
+    np.random.seed(seed)
+    env_config = dict(env_kwargs or {})
+    env_config.setdefault("scenario_split", scenario_split)
+    env = IntersectionEnv(**env_config)
+    if reward_kwargs is not None:
+        env.reward_fn = env.reward_fn.__class__(**reward_kwargs)
+    agent_cfg = agent_kwargs or {}
+    agent_1 = RLAgent("agent_1", svo_angle=agent_1_svo, **agent_cfg)
+    agent_2 = RLAgent("agent_2", svo_angle=agent_2_svo, **agent_cfg)
 
     metrics = {
         "collision_rate": [],
@@ -73,7 +84,10 @@ def train_rl_agent(
     win_steps = []
 
     for episode in range(num_episodes):
-        obs, info = env.reset()
+        if episode == 0:
+            obs, info = env.reset(seed=seed)
+        else:
+            obs, info = env.reset()
         total_reward_1 = 0.0
         total_reward_2 = 0.0
         terminated = False

@@ -10,6 +10,12 @@ from typing import Dict, Tuple, Optional
 
 from env.dynamics import VehicleDynamics
 from env.rewards import RewardFunction
+from env.scenarios import (
+    DEFAULT_SCENARIO_DISTRIBUTIONS,
+    ScenarioDistribution,
+    priority_value,
+    sample_scenario,
+)
 
 
 class IntersectionEnv(gym.Env):
@@ -35,7 +41,9 @@ class IntersectionEnv(gym.Env):
         dt: float = 0.1,
         max_steps: int = 200,
         goal_threshold: float = 2.0,
-        render_mode: Optional[str] = None
+        render_mode: Optional[str] = None,
+        scenario_split: str = "train",
+        scenario_distributions: Optional[Dict[str, ScenarioDistribution]] = None,
     ):
         """
         Initialize the intersection environment.
@@ -52,6 +60,8 @@ class IntersectionEnv(gym.Env):
         self.max_steps = max_steps
         self.goal_threshold = goal_threshold
         self.render_mode = render_mode
+        self.scenario_split = scenario_split
+        self.scenario_distributions = scenario_distributions or DEFAULT_SCENARIO_DISTRIBUTIONS
         
         # Initialize dynamics and rewards
         self.dynamics = VehicleDynamics(dt=dt)
@@ -64,9 +74,9 @@ class IntersectionEnv(gym.Env):
         )
         
         # Observation: [own_x, own_y, own_vx, own_vy, other_x, other_y, 
-        #                other_vx, other_vy, goal_dist, other_dist]
+        #                other_vx, other_vy, goal_dist, other_dist, own_priority]
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(2, 10), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(2, 11), dtype=np.float32
         )
         
         # Define intersection layout
@@ -91,6 +101,7 @@ class IntersectionEnv(gym.Env):
         # Previous goal distances for progress reward computation
         self._prev_goal_dist_1: float = 0.0
         self._prev_goal_dist_2: float = 0.0
+        self.current_scenario: Optional[Dict[str, object]] = None
         
     def reset(
         self, 
@@ -105,7 +116,26 @@ class IntersectionEnv(gym.Env):
             info: Dictionary with additional information
         """
         super().reset(seed=seed)
-        
+
+        split = self.scenario_split
+        if options is not None:
+            split = options.get("scenario_split", split)
+
+        scenario = None if options is None else options.get("scenario")
+        if scenario is None:
+            distribution = self.scenario_distributions[split]
+            scenario = sample_scenario(self.np_random, distribution)
+
+        self.current_scenario = dict(scenario)
+        self.current_scenario["scenario_split"] = split
+
+        self.start_pos_1 = np.array(scenario["start_pos_1"], dtype=np.float32)
+        self.start_pos_2 = np.array(scenario["start_pos_2"], dtype=np.float32)
+        self.goal_pos_1 = tuple(scenario["goal_pos_1"])
+        self.goal_pos_2 = tuple(scenario["goal_pos_2"])
+        self.start_vel_1 = np.array(scenario["start_vel_1"], dtype=np.float32)
+        self.start_vel_2 = np.array(scenario["start_vel_2"], dtype=np.float32)
+
         # Reset vehicle states
         self.state_1 = np.concatenate([self.start_pos_1, self.start_vel_1])
         self.state_2 = np.concatenate([self.start_pos_2, self.start_vel_2])
@@ -152,6 +182,9 @@ class IntersectionEnv(gym.Env):
         dist_to_goal_1 = self.dynamics.distance_to_point(self.state_1, self.goal_pos_1)
         dist_to_goal_2 = self.dynamics.distance_to_point(self.state_2, self.goal_pos_2)
 
+        prev_done_1 = self._done_1
+        prev_done_2 = self._done_2
+
         # Latch goal flags — once True they stay True for the rest of the episode
         if dist_to_goal_1 < self.goal_threshold:
             self._done_1 = True
@@ -160,6 +193,8 @@ class IntersectionEnv(gym.Env):
 
         done_1 = self._done_1
         done_2 = self._done_2
+        reached_goal_1 = (not prev_done_1) and done_1
+        reached_goal_2 = (not prev_done_2) and done_2
 
         # Episode terminates if collision or both vehicles have reached their goals
         terminated = collision or (done_1 and done_2)
@@ -170,6 +205,8 @@ class IntersectionEnv(gym.Env):
             self.state_1, self.state_2,
             self.goal_pos_1, self.goal_pos_2,
             collision, done_1, done_2,
+            reached_goal_1=reached_goal_1,
+            reached_goal_2=reached_goal_2,
             prev_goal_dist_1=self._prev_goal_dist_1,
             prev_goal_dist_2=self._prev_goal_dist_2,
         )
@@ -184,6 +221,8 @@ class IntersectionEnv(gym.Env):
         info["collision"] = collision
         info["done_1"] = done_1
         info["done_2"] = done_2
+        info["reached_goal_1"] = reached_goal_1
+        info["reached_goal_2"] = reached_goal_2
 
         return obs, reward, terminated, truncated, info
     
@@ -202,6 +241,9 @@ class IntersectionEnv(gym.Env):
             (self.state_1[1] - self.state_2[1])**2
         )
         
+        priority_1 = priority_value(self.current_scenario["priority"], "agent_1")
+        priority_2 = priority_value(self.current_scenario["priority"], "agent_2")
+
         # Agent 1 observation: own state + other state + distances
         obs_1 = np.array([
             self.state_1[0], self.state_1[1],  # own position
@@ -209,7 +251,8 @@ class IntersectionEnv(gym.Env):
             self.state_2[0], self.state_2[1],  # other position
             self.state_2[2], self.state_2[3],  # other velocity
             dist_to_goal_1,  # distance to own goal
-            dist_between      # distance to other vehicle
+            dist_between,     # distance to other vehicle
+            priority_1,       # own priority hint
         ], dtype=np.float32)
         
         # Agent 2 observation: own state + other state + distances
@@ -219,7 +262,8 @@ class IntersectionEnv(gym.Env):
             self.state_1[0], self.state_1[1],  # other position
             self.state_1[2], self.state_1[3],  # other velocity
             dist_to_goal_2,  # distance to own goal
-            dist_between      # distance to other vehicle
+            dist_between,     # distance to other vehicle
+            priority_2,       # own priority hint
         ], dtype=np.float32)
         
         return {"agent_1": obs_1, "agent_2": obs_2}
@@ -229,7 +273,8 @@ class IntersectionEnv(gym.Env):
         return {
             "steps": self.steps,
             "state_1": self.state_1.copy(),
-            "state_2": self.state_2.copy()
+            "state_2": self.state_2.copy(),
+            "scenario": dict(self.current_scenario) if self.current_scenario is not None else None,
         }
     
     def render(self):

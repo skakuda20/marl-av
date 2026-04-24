@@ -1,308 +1,291 @@
 """
-Experiment runner: train, test, and evaluate Q-learning agents.
-
-Reads all parameters from params.yaml (or a custom path passed on the
-command line) so every run is fully reproducible.
-
-Usage
------
-    python3 run_experiment.py                      # uses params.yaml
-    python3 run_experiment.py my_params.yaml       # custom file
-    python3 run_experiment.py --params ablation.yaml
-
-Output
-------
-If output.results_dir is set, the following files are written there:
-    q_tables.npz        — Q-tables + SVO angles for both agents
-    train_metrics.json  — windowed training metrics
-    eval_results.json   — per-method evaluation results
+Experiment runner for repeated seeded training, ablations, and cross-play.
 """
 
-import sys
-import os
+from __future__ import annotations
+
+import argparse
 import json
 import math
-import argparse
+import os
+import sys
+from copy import deepcopy
 from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
-import yaml
 import numpy as np
+import yaml
 
-# Allow running from the repo root without installing the package
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
-
+from agents.gradient_solver import approximate_nash_equilibrium, empirical_best_response
+from agents.heuristic import MixtureAgent, create_heuristic_agent, create_heuristic_pair
 from env.intersection_env import IntersectionEnv
-from env.rewards import RewardFunction, apply_svo_transform
-from agents.rl_agent import RLAgent
-from agents.heuristic import create_heuristic_pair
-from evaluation.compare_methods import run_eval_episodes, compare_methods
-from evaluation.metrics import (
-    compute_success_rate, compute_collision_rate, compute_efficiency
-)
+from env.rewards import RewardFunction
+from evaluation.compare_methods import compare_methods, evaluate_cross_play, run_eval_episodes
+from evaluation.metrics import compute_generalization_gap, summarize_episodes
+from training.train_rl import train_rl_agent
 
-
-# ---------------------------------------------------------------------------
-# Parameter loading
-# ---------------------------------------------------------------------------
 
 def load_params(path: str = "params.yaml") -> dict:
-    with open(path) as f:
+    with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
 def _svo_radians(degrees: float) -> float:
-    return math.radians(degrees)
+    return math.radians(float(degrees))
 
 
-# ---------------------------------------------------------------------------
-# Training
-# ---------------------------------------------------------------------------
-
-def run_training(params: dict):
-    """
-    Train two Q-learning agents using parameters from params.yaml.
-
-    Returns:
-        (agent_1, agent_2, train_metrics)
-    """
-    env_cfg   = params["env"]
-    rew_cfg   = params["rewards"]
-    svo_cfg   = params["svo"]
-    ql_cfg    = params["q_learning"]
-    tr_cfg    = params["training"]
-
-    svo_1 = _svo_radians(svo_cfg["agent_1_degrees"])
-    svo_2 = _svo_radians(svo_cfg["agent_2_degrees"])
-
-    env = IntersectionEnv(
-        dt=env_cfg["dt"],
-        max_steps=env_cfg["max_steps"],
-        goal_threshold=env_cfg["goal_threshold"],
-    )
-
-    # Patch the environment's reward function with params.yaml values
-    env.reward_fn = RewardFunction(
-        collision_penalty=rew_cfg["collision_penalty"],
-        goal_reward=rew_cfg["goal_reward"],
-        time_penalty=rew_cfg["time_penalty"],
-        efficiency_weight=rew_cfg["efficiency_weight"],
-        min_safe_distance=rew_cfg["min_safe_distance"],
-        progress_weight=rew_cfg.get("progress_weight", 0.1),
-    )
-
-    agent_1 = RLAgent(
-        "agent_1",
-        svo_angle=svo_1,
-        learning_rate=ql_cfg["learning_rate"],
-        discount=ql_cfg["discount"],
-        epsilon_start=ql_cfg["epsilon_start"],
-        epsilon_min=ql_cfg["epsilon_min"],
-        epsilon_decay=ql_cfg["epsilon_decay"],
-    )
-    agent_2 = RLAgent(
-        "agent_2",
-        svo_angle=svo_2,
-        learning_rate=ql_cfg["learning_rate"],
-        discount=ql_cfg["discount"],
-        epsilon_start=ql_cfg["epsilon_start"],
-        epsilon_min=ql_cfg["epsilon_min"],
-        epsilon_decay=ql_cfg["epsilon_decay"],
-    )
-
-    num_episodes = tr_cfg["num_episodes"]
-    log_interval = tr_cfg["log_interval"]
-
-    metrics = {
-        "collision_rate": [], "success_rate": [],
-        "avg_reward_1": [], "avg_reward_2": [], "avg_steps": [],
-    }
-
-    win_collisions = win_successes = 0
-    win_r1, win_r2, win_steps = [], [], []
-
-    print(f"\n{'='*60}")
-    print(f"TRAINING  ({num_episodes} episodes)")
-    print(f"  agent_1 SVO: {svo_cfg['agent_1_degrees']}°  |  "
-          f"agent_2 SVO: {svo_cfg['agent_2_degrees']}°")
-    print(f"  α={ql_cfg['learning_rate']}  γ={ql_cfg['discount']}  "
-          f"ε: {ql_cfg['epsilon_start']} → {ql_cfg['epsilon_min']}  "
-          f"decay={ql_cfg['epsilon_decay']}")
-    print(f"{'='*60}")
-
-    for episode in range(num_episodes):
-        obs, _ = env.reset()
-        total_r1 = total_r2 = 0.0
-        terminated = truncated = False
-
-        while not (terminated or truncated):
-            obs_1, obs_2 = obs["agent_1"], obs["agent_2"]
-            a1 = agent_1.get_action(obs_1, training=True)
-            a2 = agent_2.get_action(obs_2, training=True)
-
-            next_obs, reward, terminated, truncated, info = env.step(
-                np.array([a1, a2])
-            )
-            done = terminated or truncated
-
-            raw_r1, raw_r2 = reward["agent_1"], reward["agent_2"]
-            svo_r1 = apply_svo_transform(raw_r1, raw_r2, agent_1.svo_angle)
-            svo_r2 = apply_svo_transform(raw_r2, raw_r1, agent_2.svo_angle)
-
-            agent_1.update(obs_1, a1, svo_r1, next_obs["agent_1"], done)
-            agent_2.update(obs_2, a2, svo_r2, next_obs["agent_2"], done)
-
-            obs = next_obs
-            total_r1 += raw_r1
-            total_r2 += raw_r2
-
-        agent_1.decay_epsilon()
-        agent_2.decay_epsilon()
-
-        win_collisions += int(info.get("collision", False))
-        win_successes  += int(info.get("done_1", False) and info.get("done_2", False))
-        win_r1.append(total_r1)
-        win_r2.append(total_r2)
-        win_steps.append(info["steps"])
-
-        if (episode + 1) % log_interval == 0:
-            metrics["collision_rate"].append(win_collisions / log_interval)
-            metrics["success_rate"].append(win_successes / log_interval)
-            metrics["avg_reward_1"].append(float(np.mean(win_r1)))
-            metrics["avg_reward_2"].append(float(np.mean(win_r2)))
-            metrics["avg_steps"].append(float(np.mean(win_steps)))
-            print(
-                f"  ep {episode + 1:>5} | "
-                f"coll {metrics['collision_rate'][-1]:.2f} | "
-                f"succ {metrics['success_rate'][-1]:.2f} | "
-                f"R1 {metrics['avg_reward_1'][-1]:>7.2f} | "
-                f"R2 {metrics['avg_reward_2'][-1]:>7.2f} | "
-                f"steps {metrics['avg_steps'][-1]:.1f} | "
-                f"ε {agent_1.epsilon:.3f}"
-            )
-            win_collisions = win_successes = 0
-            win_r1, win_r2, win_steps = [], [], []
-
-    return agent_1, agent_2, metrics
-
-
-# ---------------------------------------------------------------------------
-# Evaluation
-# ---------------------------------------------------------------------------
-
-def run_evaluation(agent_1: RLAgent, agent_2: RLAgent, params: dict) -> dict:
-    """
-    Evaluate trained RL agents against heuristic baselines.
-
-    Returns:
-        Full results dict from compare_methods.
-    """
-    ev_cfg  = params["evaluation"]
+def _env_kwargs(params: dict, scenario_split: str) -> Dict[str, Any]:
     env_cfg = params["env"]
-    rew_cfg = params["rewards"]
-    svo_cfg = params["svo"]
-
-    num_eval = ev_cfg["num_eval_episodes"]
-
-    # Build an eval env that matches the training configuration
-    eval_env = IntersectionEnv(
-        dt=env_cfg["dt"],
-        max_steps=env_cfg["max_steps"],
-        goal_threshold=env_cfg["goal_threshold"],
-    )
-    eval_env.reward_fn = RewardFunction(
-        collision_penalty=rew_cfg["collision_penalty"],
-        goal_reward=rew_cfg["goal_reward"],
-        time_penalty=rew_cfg["time_penalty"],
-        efficiency_weight=rew_cfg["efficiency_weight"],
-        min_safe_distance=rew_cfg["min_safe_distance"],
-        progress_weight=rew_cfg.get("progress_weight", 0.1),
-    )
-
-    method_dict = {
-        f"RL  (A1={svo_cfg['agent_1_degrees']}° vs A2={svo_cfg['agent_2_degrees']}°)":
-            (agent_1, agent_2),
+    return {
+        "dt": env_cfg["dt"],
+        "max_steps": env_cfg["max_steps"],
+        "goal_threshold": env_cfg["goal_threshold"],
+        "scenario_split": scenario_split,
     }
-    for pair in ev_cfg.get("baselines", []):
-        label = f"heuristic  {pair[0]} vs {pair[1]}"
-        method_dict[label] = create_heuristic_pair(pair[0], pair[1])
 
-    print(f"\n{'='*60}")
-    print(f"EVALUATION  ({num_eval} episodes per method)")
-    print(f"{'='*60}")
 
-    results = compare_methods(
-        num_eval_episodes=num_eval,
-        method_dict=method_dict,
-        env=eval_env,
+def _reward_kwargs(params: dict) -> Dict[str, Any]:
+    rew_cfg = params["rewards"]
+    return {
+        "collision_penalty": rew_cfg["collision_penalty"],
+        "goal_reward": rew_cfg["goal_reward"],
+        "time_penalty": rew_cfg["time_penalty"],
+        "efficiency_weight": rew_cfg["efficiency_weight"],
+        "min_safe_distance": rew_cfg["min_safe_distance"],
+        "progress_weight": rew_cfg.get("progress_weight", 0.1),
+    }
+
+
+def _make_env(params: dict, scenario_split: str) -> IntersectionEnv:
+    env = IntersectionEnv(**_env_kwargs(params, scenario_split))
+    env.reward_fn = RewardFunction(**_reward_kwargs(params))
+    return env
+
+
+def _aggregate_numeric(values: List[Any]) -> Any:
+    first = values[0]
+    if isinstance(first, dict):
+        return {key: _aggregate_numeric([v[key] for v in values]) for key in first}
+    if isinstance(first, list):
+        if not first:
+            return {"mean": [], "std": []}
+        return {
+            "mean": np.mean(np.array(values, dtype=float), axis=0).tolist(),
+            "std": np.std(np.array(values, dtype=float), axis=0).tolist(),
+        }
+    if isinstance(first, (int, float, np.integer, np.floating)) or first is None:
+        arr = np.array([0.0 if v is None else float(v) for v in values], dtype=float)
+        return {"mean": float(np.mean(arr)), "std": float(np.std(arr))}
+    return first
+
+
+def _ablation_configs(params: dict) -> List[Dict[str, Any]]:
+    base_svo = params["svo"]
+    ab_cfg = params.get("ablations", {})
+    angle_list = ab_cfg.get("svo_angles_degrees", [0.0, 22.5, 45.0])
+    return [
+        {
+            "label": "selfish_vs_selfish",
+            "agent_1_degrees": 0.0,
+            "agent_2_degrees": 0.0,
+            "use_svo": True,
+        },
+        {
+            "label": "prosocial_vs_prosocial",
+            "agent_1_degrees": 45.0,
+            "agent_2_degrees": 45.0,
+            "use_svo": True,
+        },
+        {
+            "label": "asymmetric_prosocial_selfish",
+            "agent_1_degrees": 45.0,
+            "agent_2_degrees": 0.0,
+            "use_svo": True,
+        },
+        {
+            "label": "base_no_svo",
+            "agent_1_degrees": base_svo["agent_1_degrees"],
+            "agent_2_degrees": base_svo["agent_2_degrees"],
+            "use_svo": False,
+        },
+        *[
+            {
+                "label": f"svo_sweep_{angle:g}",
+                "agent_1_degrees": angle,
+                "agent_2_degrees": angle,
+                "use_svo": True,
+            }
+            for angle in angle_list
+        ],
+    ]
+
+
+def _opponent_pairs(params: dict) -> Dict[str, Tuple[Any, Any]]:
+    eval_cfg = params["evaluation"]
+    pairs: Dict[str, Tuple[Any, Any]] = {}
+    for p1, p2 in eval_cfg.get("baselines", []):
+        pairs[f"{p1}_vs_{p2}"] = create_heuristic_pair(p1, p2)
+
+    mixture_policies = eval_cfg.get(
+        "unseen_mixture_policies",
+        ["aggressive", "cautious", "yield", "priority"],
     )
-    return results
+    pairs["unseen_mixture"] = (
+        create_heuristic_agent("agent_1", "priority"),
+        MixtureAgent("agent_2", mixture_policies),
+    )
+    return pairs
 
 
-# ---------------------------------------------------------------------------
-# Saving
-# ---------------------------------------------------------------------------
+def train_one_seed(params: dict, config: Dict[str, Any], seed: int):
+    tr_cfg = params["training"]
+    ql_cfg = params["q_learning"]
+    agent_1, agent_2, train_metrics = train_rl_agent(
+        num_episodes=tr_cfg["num_episodes"],
+        agent_1_svo=_svo_radians(config["agent_1_degrees"]),
+        agent_2_svo=_svo_radians(config["agent_2_degrees"]),
+        use_svo=config["use_svo"],
+        seed=seed,
+        env_kwargs=_env_kwargs(params, "train"),
+        reward_kwargs=_reward_kwargs(params),
+        agent_kwargs={
+            "learning_rate": ql_cfg["learning_rate"],
+            "discount": ql_cfg["discount"],
+            "epsilon_start": ql_cfg["epsilon_start"],
+            "epsilon_min": ql_cfg["epsilon_min"],
+            "epsilon_decay": ql_cfg["epsilon_decay"],
+        },
+        log_interval=tr_cfg["log_interval"],
+        verbose=tr_cfg.get("verbose", True),
+    )
+    return agent_1, agent_2, train_metrics
 
-def save_outputs(agent_1, agent_2, train_metrics, eval_results, params):
+
+def _best_response_summary(env: IntersectionEnv, opponent_policy: str, n_episodes: int) -> Dict[str, Any]:
+    br_agent, scores = empirical_best_response(
+        env=env,
+        opponent_policy=opponent_policy,
+        n_episodes=n_episodes,
+    )
+    return {
+        "policy": br_agent.label,
+        "candidate_scores": scores,
+    }
+
+
+def evaluate_one_seed(
+    params: dict,
+    config: Dict[str, Any],
+    seed: int,
+    agent_1,
+    agent_2,
+    rl_opponents: Dict[str, Tuple[Any, Any]],
+) -> Dict[str, Any]:
+    eval_cfg = params["evaluation"]
+    n_eval = eval_cfg["num_eval_episodes"]
+    seen_env = _make_env(params, "train")
+    unseen_env = _make_env(params, "test")
+
+    seen_episodes = run_eval_episodes(
+        agent_1, agent_2, deepcopy(seen_env), n_episodes=n_eval, seed=seed, scenario_split="train"
+    )
+    unseen_episodes = run_eval_episodes(
+        agent_1, agent_2, deepcopy(unseen_env), n_episodes=n_eval, seed=seed, scenario_split="test"
+    )
+    seen_metrics = summarize_episodes(seen_episodes, dt=seen_env.dt)
+    unseen_metrics = summarize_episodes(unseen_episodes, dt=unseen_env.dt)
+
+    heuristic_opponents = _opponent_pairs(params)
+    row_agents = {config["label"]: (agent_1, agent_2)}
+    col_agents = {**heuristic_opponents, **rl_opponents}
+    cross_seen = evaluate_cross_play(
+        row_agents=row_agents,
+        col_agents=col_agents,
+        env=deepcopy(seen_env),
+        n_episodes=n_eval,
+        seed=seed,
+        scenario_split="train",
+    )
+    cross_unseen = evaluate_cross_play(
+        row_agents=row_agents,
+        col_agents=col_agents,
+        env=deepcopy(unseen_env),
+        n_episodes=n_eval,
+        seed=seed,
+        scenario_split="test",
+    )
+
+    regret = {}
+    for opponent_name, opponent_pair in heuristic_opponents.items():
+        if "_vs_" not in opponent_name:
+            continue
+        opponent_policy = opponent_name.split("_vs_")[-1]
+        br = _best_response_summary(deepcopy(unseen_env), opponent_policy, n_eval)
+        trained_payoff = cross_unseen[config["label"]][opponent_name]["avg_reward_1"]
+        regret[opponent_name] = {
+            "best_response_policy": br["policy"],
+            "best_response_value": max(br["candidate_scores"].values()),
+            "trained_value": trained_payoff,
+            "regret": max(br["candidate_scores"].values()) - trained_payoff,
+        }
+
+    nash = approximate_nash_equilibrium(
+        env=deepcopy(unseen_env),
+        n_episodes=n_eval,
+        candidate_policies=eval_cfg.get(
+            "game_baseline_candidates",
+            ["constant", "cautious", "aggressive", "yield", "priority"],
+        ),
+    )
+
+    heuristic_results = compare_methods(
+        num_eval_episodes=n_eval,
+        method_dict=heuristic_opponents,
+        env=deepcopy(unseen_env),
+        seed=seed,
+        scenario_split="test",
+    )
+
+    return {
+        "config": config,
+        "seed": seed,
+        "seen_self_play": seen_metrics,
+        "unseen_self_play": unseen_metrics,
+        "generalization_gap": {
+            "success_rate": compute_generalization_gap(seen_metrics, unseen_metrics, "success_rate"),
+            "collision_rate": compute_generalization_gap(seen_metrics, unseen_metrics, "collision_rate"),
+            "avg_reward_1": compute_generalization_gap(seen_metrics, unseen_metrics, "avg_reward_1"),
+        },
+        "cross_play_seen": cross_seen,
+        "cross_play_unseen": cross_unseen,
+        "regret_against_fixed_opponents": regret,
+        "game_theoretic_baselines": {
+            "approx_nash": {
+                "policy_1": nash.policy_1,
+                "policy_2": nash.policy_2,
+                "payoff_1": nash.payoff_1,
+                "payoff_2": nash.payoff_2,
+                "exploitability": nash.exploitability,
+            },
+            "heuristic_baselines": heuristic_results,
+        },
+    }
+
+
+def save_outputs(results: Dict[str, Any], params: dict) -> None:
     out_cfg = params.get("output", {})
-    if not out_cfg.get("save_q_tables", True):
-        return
-
     results_dir = Path(out_cfg.get("results_dir", "results"))
     results_dir.mkdir(parents=True, exist_ok=True)
+    out_path = results_dir / "experiment_summary.json"
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
+    print(f"Saved experiment summary -> {out_path}")
 
-    q_path = results_dir / "q_tables.npz"
-    np.savez(
-        q_path,
-        q_table_1=agent_1.q_table,
-        q_table_2=agent_2.q_table,
-        svo_1=agent_1.svo_angle,
-        svo_2=agent_2.svo_angle,
-    )
-    print(f"\nSaved Q-tables  → {q_path}")
-
-    tm_path = results_dir / "train_metrics.json"
-    with open(tm_path, "w") as f:
-        json.dump(train_metrics, f, indent=2)
-    print(f"Saved training metrics → {tm_path}")
-
-    # eval_results may contain None (avg_time_to_clear); convert for JSON
-    def _jsonify(obj):
-        if obj is None:
-            return None
-        if isinstance(obj, float):
-            return obj
-        return obj
-
-    ev_path = results_dir / "eval_results.json"
-    serialisable = {
-        label: {k: _jsonify(v) for k, v in m.items()}
-        for label, m in eval_results.items()
-    }
-    with open(ev_path, "w") as f:
-        json.dump(serialisable, f, indent=2)
-    print(f"Saved eval results     → {ev_path}")
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Train and evaluate marl-av Q-learning agents."
-    )
-    parser.add_argument(
-        "params_file",
-        nargs="?",
-        default="params.yaml",
-        help="Path to the YAML parameter file (default: params.yaml)",
-    )
-    parser.add_argument(
-        "--params",
-        dest="params_file_flag",
-        default=None,
-        help="Alternative flag-style path: --params my_params.yaml",
-    )
+    parser = argparse.ArgumentParser(description="Run marl-av seeded ablations and evaluation.")
+    parser.add_argument("params_file", nargs="?", default="params.yaml")
+    parser.add_argument("--params", dest="params_file_flag", default=None)
     args = parser.parse_args()
 
     params_path = args.params_file_flag or args.params_file
@@ -310,19 +293,55 @@ def main():
         print(f"ERROR: params file not found: {params_path}")
         sys.exit(1)
 
-    print(f"Loading parameters from: {params_path}")
     params = load_params(params_path)
+    seeds = params.get("seeds", [0, 1, 2])
+    configs = _ablation_configs(params)
 
-    # ---- TRAIN ----
-    agent_1, agent_2, train_metrics = run_training(params)
+    all_seed_results: Dict[str, List[Dict[str, Any]]] = {cfg["label"]: [] for cfg in configs}
+    trained_agents_by_seed: Dict[int, Dict[str, Tuple[Any, Any]]] = {}
+    train_metrics_by_config: Dict[str, List[Dict[str, Any]]] = {cfg["label"]: [] for cfg in configs}
 
-    # ---- EVALUATE ----
-    eval_results = run_evaluation(agent_1, agent_2, params)
+    for seed in seeds:
+        trained_agents_by_seed[seed] = {}
+        for config in configs:
+            print(f"\nTraining {config['label']} with seed {seed}")
+            agent_1, agent_2, train_metrics = train_one_seed(params, config, seed)
+            trained_agents_by_seed[seed][config["label"]] = (agent_1, agent_2)
+            train_metrics_by_config[config["label"]].append(train_metrics)
 
-    # ---- SAVE ----
-    save_outputs(agent_1, agent_2, train_metrics, eval_results, params)
+        for config in configs:
+            rl_opponents = {
+                label: agents
+                for label, agents in trained_agents_by_seed[seed].items()
+                if label != config["label"]
+            }
+            agent_1, agent_2 = trained_agents_by_seed[seed][config["label"]]
+            print(f"Evaluating {config['label']} with seed {seed}")
+            seed_result = evaluate_one_seed(
+                params=params,
+                config=config,
+                seed=seed,
+                agent_1=agent_1,
+                agent_2=agent_2,
+                rl_opponents=rl_opponents,
+            )
+            all_seed_results[config["label"]].append(seed_result)
 
-    print("\nDone.")
+    aggregate_results = {
+        label: {
+            "train_metrics": _aggregate_numeric(train_metrics_by_config[label]),
+            "evaluation": _aggregate_numeric(all_seed_results[label]),
+        }
+        for label in all_seed_results
+    }
+
+    final_results = {
+        "params_path": params_path,
+        "seeds": seeds,
+        "per_seed": all_seed_results,
+        "aggregate": aggregate_results,
+    }
+    save_outputs(final_results, params)
 
 
 if __name__ == "__main__":

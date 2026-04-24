@@ -1,149 +1,70 @@
 # marl-av
 
-Multi-Agent Reinforcement Learning for Autonomous Vehicle Interaction
+Multi-agent RL and empirical game-theoretic evaluation for two-vehicle intersection negotiation.
 
-## Overview
+## Changes
 
-This project compares game-theoretic and reinforcement learning approaches to autonomous vehicle interaction at intersections. The implementation provides a clean, modular simulation environment using Python and Gymnasium.
-
-## Features
-
-- **Two-Vehicle Intersection Environment**: Vehicles approach from perpendicular directions
-- **Deterministic Vehicle Dynamics**: Simple kinematic model with acceleration control
-- **Reward Structure**: Balances collision avoidance, efficiency, and goal achievement
-- **Heuristic Agents**: Multiple baseline policies for testing and comparison
-- **Visualization Tools**: Plot trajectories and analyze episode outcomes
-
-## Project Structure
-
-```
-marl-av/
-├── env/
-│   ├── intersection_env.py   # Gymnasium environment
-│   ├── dynamics.py            # Vehicle dynamics model
-│   └── rewards.py             # Reward function
-├── agents/
-│   ├── heuristic.py           # Heuristic baseline agents
-│   ├── rl_agent.py            # RL agent (future work)
-│   └── gradient_solver.py     # Game-theoretic solver (future work)
-├── demo/
-│   └── render_episode.py      # Visualization demo
-├── training/
-│   └── train_rl.py            # Training script (future work)
-├── evaluation/
-│   ├── compare_methods.py     # Comparison framework (future work)
-│   └── metrics.py             # Evaluation metrics (future work)
-├── requirements.txt
-└── README.md
-```
-
-## Installation
-
-```bash
-# Clone the repository
-git clone <repository-url>
-cd marl-av
-
-# Install dependencies
-pip install -r requirements.txt
-```
+- Goal rewards are now transition-based: each agent gets the goal reward once, when it first reaches the goal.
+- `IntersectionEnv.reset()` now randomizes scenario parameters with deterministic seeds:
+  spawn distance, initial speed, arrival offset, intersection center, and a per-agent priority hint.
+- Train and test scenario distributions are split (`train` vs `test`) so generalization gaps are measurable.
+- Evaluation now reports cross-play, minimum TTC, safety margin, jerk, reward fairness, seen-vs-unseen gap, and regret against fixed opponents.
+- `run_experiment.py` runs repeated seeds, SVO ablations, symmetric/asymmetric pairings, empirical best responses, and an approximate Nash baseline over the heuristic policy set.
 
 ## Quick Start
 
-### Run Demo with Heuristic Agents
-
 ```bash
-python demo/render_episode.py
+python3 test_basic.py
+python3 test_suite.py
+python3 run_experiment.py
 ```
 
-This runs multiple scenarios with different agent pairs:
-- Both constant velocity
-- Both cautious
-- Aggressive vs cautious
-- Yield vs constant
+## Main Components
 
-### Use the Environment Programmatically
+- [env/intersection_env.py](/home/kakudas/GitHub/marl-av/env/intersection_env.py)
+  Randomized Gymnasium environment with seeded train/test splits.
+- [env/scenarios.py](/home/kakudas/GitHub/marl-av/env/scenarios.py)
+  Scenario distribution definitions and reset-time sampling.
+- [training/train_rl.py](/home/kakudas/GitHub/marl-av/training/train_rl.py)
+  Seeded tabular Q-learning with optional SVO shaping.
+- [evaluation/compare_methods.py](/home/kakudas/GitHub/marl-av/evaluation/compare_methods.py)
+  Self-play and cross-play evaluation with trace collection.
+- [evaluation/metrics.py](/home/kakudas/GitHub/marl-av/evaluation/metrics.py)
+  Efficiency, safety, smoothness, fairness, and generalization metrics.
+- [agents/gradient_solver.py](/home/kakudas/GitHub/marl-av/agents/gradient_solver.py)
+  Empirical best-response and approximate Nash search over the heuristic policy set.
 
-```python
-from env.intersection_env import IntersectionEnv
-from agents.heuristic import create_heuristic_pair
-import numpy as np
+## Scenarios
 
-# Create environment
-env = IntersectionEnv(dt=0.1, max_steps=200)
+The observation is now 11-dimensional:
 
-# Create agents
-agent_1, agent_2 = create_heuristic_pair("cautious", "cautious")
+1. own position `(x, y)`
+2. own velocity `(vx, vy)`
+3. other position `(x, y)`
+4. other velocity `(vx, vy)`
+5. distance to own goal
+6. distance to the other vehicle
+7. own priority hint in `{-1, 0, 1}`
 
-# Run episode
-obs, info = env.reset()
-done = False
+## Baselines
 
-while not done:
-    action_1 = agent_1.get_action(obs["agent_1"])
-    action_2 = agent_2.get_action(obs["agent_2"])
-    action = np.array([action_1, action_2])
-    
-    obs, reward, terminated, truncated, info = env.step(action)
-    done = terminated or truncated
+Supported heuristic/game baselines include:
 
-print(f"Episode finished: Collision={info['collision']}")
-```
+- `constant`
+- `cautious`
+- `aggressive`
+- `yield`
+- `priority`
+- empirical best response over the heuristic set
+- approximate Nash over the heuristic set
 
-## Environment Details
+## Outputs
 
-### Observation Space
+`run_experiment.py` writes [results/experiment_summary.json](/home/kakudas/GitHub/marl-av/results/experiment_summary.json) containing:
 
-Each agent observes (10-dimensional vector):
-- Own position (x, y)
-- Own velocity (vx, vy)
-- Other vehicle position (x, y)
-- Other vehicle velocity (vx, vy)
-- Distance to own goal
-- Distance to other vehicle
-
-### Action Space
-
-Continuous acceleration control in [-1, 1]:
-- -1: Maximum braking (5 m/s²)
-- 0: Maintain speed
-- 1: Maximum acceleration (3 m/s²)
-
-### Reward Structure
-
-- **Collision**: -100 (terminal)
-- **Goal reached**: +50
-- **Time penalty**: -0.1 per step
-- **Efficiency bonus**: +0.5 * (speed / max_speed)
-- **Proximity penalty**: Scaled by distance when < 5m
-
-### Vehicle Dynamics
-
-- Maximum speed: 15 m/s (~54 km/h)
-- Maximum acceleration: 3 m/s²
-- Maximum braking: 5 m/s²
-- Vehicle dimensions: 4.5m × 2.0m
-- Time step: 0.1s (configurable)
-
-## Heuristic Agent Types
-
-1. **ConstantVelocityAgent**: Maintains constant speed
-2. **CautiousAgent**: Slows down when other vehicle is nearby
-3. **AggressiveAgent**: Maintains high speed, only brakes if collision imminent
-4. **YieldAgent**: Yields to other vehicle at intersection
-
-## Future Work
-
-- [ ] Implement RL training pipeline
-- [ ] Add game-theoretic solver
-- [ ] Comprehensive evaluation metrics
-- [ ] Multi-scenario testing
-- [ ] More complex intersection geometries
-
-## License
-
-MIT License
-
-## Contributing
-
-Contributions welcome! Please feel free to submit issues or pull requests.
+- per-seed training/evaluation results
+- mean/std aggregates across seeds
+- seen vs unseen self-play metrics
+- seen vs unseen cross-play against heuristics, mixtures, and RL ablations
+- regret against fixed opponents
+- empirical game-theoretic baseline summaries

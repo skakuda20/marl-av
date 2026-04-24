@@ -46,6 +46,8 @@ class RewardFunction:
         collision: bool,
         done1: bool,
         done2: bool,
+        reached_goal_1: bool = False,
+        reached_goal_2: bool = False,
         prev_goal_dist_1: float = 0.0,
         prev_goal_dist_2: float = 0.0,
     ) -> Tuple[float, float]:
@@ -60,6 +62,8 @@ class RewardFunction:
             collision: Whether collision occurred
             done1: Whether vehicle 1 reached goal
             done2: Whether vehicle 2 reached goal
+            reached_goal_1: Whether vehicle 1 reached goal on this transition
+            reached_goal_2: Whether vehicle 2 reached goal on this transition
             prev_goal_dist_1: Distance to goal for vehicle 1 at the previous step
             prev_goal_dist_2: Distance to goal for vehicle 2 at the previous step
         
@@ -75,10 +79,10 @@ class RewardFunction:
             reward2 += self.collision_penalty
             return reward1, reward2
         
-        # Goal reward
-        if done1:
+        # Goal reward is awarded once on the transition into the goal state.
+        if reached_goal_1:
             reward1 += self.goal_reward
-        if done2:
+        if reached_goal_2:
             reward2 += self.goal_reward
         
         # Time penalty (encourages faster completion)

@@ -1,0 +1,100 @@
+**2. Problem Setting**
+- Two-vehicle intersection negotiation with continuous control over longitudinal acceleration.
+- Each agent must reach its goal safely and efficiently.
+- Interaction includes conflict over right-of-way, timing, and implicit coordination.
+- Evaluation must account for:
+  success, collision, efficiency, safety margin, smoothness, fairness, and generalization.
+
+**3. Method**
+- Environment:
+  randomized intersection scenarios with train/test split.
+- Harder unseen split:
+  denser arrival overlap, broader speed variation, asymmetric priority hints, geometry variation, observation noise, and partial occlusion.
+- Learning:
+  tabular Q-learning for both agents.
+- SVO reward shaping:
+  each agent updates on a blend of self and other reward.
+- Focus on asymmetric SVO:
+  agent 1 uses angle `0, 5, 10, 15, 20, 22.5, 30, 45`, agent 2 remains selfish.
+- Baselines:
+  selfish RL, non-SVO RL, heuristic policies, approximate Nash, empirical best response.
+
+**4. Empirical Game Construction**
+- Define a policy universe including:
+  parameterized heuristic variants and trained RL/SVO policies.
+- Build payoff matrices from cross-play over the shared policy universe.
+- Compute:
+  equilibrium, best responses, exploitability, and regret using the same game.
+- Compare two games:
+  without SVO candidates vs with SVO candidates.
+
+**5. Experimental Design**
+- Multi-seed evaluation across seen and unseen splits.
+- Self-play and cross-play against heuristics, mixed populations, Nash-like baselines, and empirical best response.
+- Primary metrics:
+  unseen success and collision.
+- Secondary metrics:
+  joint utility, fairness, efficiency, regret, exploitability.
+
+**6. Main Results**
+- Best learned policy on unseen self-play:
+  `Asymmetric SVO 5°`
+  with `98.7%` success and `1.2%` collision.
+- Selfish and non-SVO learned baselines:
+  `94.8%` success and `5.0%` collision.
+- Small asymmetric SVO improves safety and completion.
+- Larger SVO angles degrade:
+  `45°` drops to `92.2%` success and `6.8%` collision.
+- Best learned method in direct unseen comparison:
+  `asymmetric_svo_10`.
+- Oracle-style empirical best response scores highest overall, but is not the main deployable learned-policy comparison.
+
+**7. Game-Theoretic Findings**
+- Without SVO, empirical equilibrium:
+  `yield_early` vs `aggressive_fast`
+  with joint utility `96.91`.
+- With SVO included, empirical equilibrium:
+  `yield_early` vs `asymmetric_svo_main`
+  with joint utility `112.36`.
+- Adding SVO policies improves equilibrium joint utility by `+15.45`.
+- Exploitability remains `0.0` in both aggregate equilibrium summaries.
+- This indicates SVO changes the strategic structure of the game, not just isolated policy rewards.
+
+**8. Interpretation**
+- SVO is beneficial in a narrow asymmetric regime, not as a uniformly stronger social preference.
+- Mild prosociality helps coordination under uncertainty.
+- Stronger prosociality can over-yield or destabilize interactions.
+- The main value of SVO appears in:
+  robustness, safer negotiation, and improved equilibrium outcomes.
+- The strongest claim is not “SVO dominates all methods,” but:
+  “small asymmetric SVO improves learned coordination and upgrades the empirical equilibrium.”
+
+**9. Implications**
+- Social preference can be a useful inductive bias in multi-agent driving.
+- Strategic autonomous driving may benefit from combining learning with empirical game analysis.
+- Evaluating only self-play is insufficient; cross-play and equilibrium analysis reveal more meaningful behavior.
+- Safety-focused autonomous driving should prioritize robust interaction under heterogeneous populations.
+
+**10. Limitations**
+- Two-agent, single-conflict setting.
+- Tabular RL limits policy complexity.
+- Empirical game still uses a finite candidate universe.
+- Approximate Nash and best response are empirical, not analytical guarantees.
+- Some top-performing references are oracle-like and not directly deployable learned agents.
+
+**11. Conclusion**
+- The project demonstrates a working empirical game-theoretic autonomous driving framework.
+- Adding SVO improves learned policy robustness under harder unseen conditions.
+- The clearest result is that SVO changes the empirical equilibrium toward higher joint utility.
+- Small asymmetric SVO is the most effective regime.
+
+**12. Future Work**
+- Expand to richer empirical games with more learned checkpoints and policy families.
+- Move from pure-strategy empirical equilibria to mixed-strategy analysis.
+- Use function approximation or deep MARL instead of tabular Q-learning.
+- Extend to multi-agent traffic with more than two vehicles.
+- Add richer intersection geometries, partial observability, and intent uncertainty.
+- Learn or adapt SVO online based on traffic context.
+- Study equilibrium selection and robustness under population shifts.
+- Compare against stronger modern MARL baselines beyond tabular RL and heuristics.
+

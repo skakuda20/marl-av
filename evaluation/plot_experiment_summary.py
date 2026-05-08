@@ -52,6 +52,12 @@ class ExperimentRow:
     generalization_reward_gap: float
 
 
+def metric_unwrap(metric_payload):
+    if isinstance(metric_payload, dict) and "mean" in metric_payload:
+        return metric_payload["mean"]
+    return metric_payload
+
+
 def load_summary(path: str) -> Dict:
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -76,22 +82,22 @@ def config_value(value):
 
 
 def to_display_name(label: str, config: Dict) -> str:
+    aliases = {
+        "selfish_vs_selfish": "Selfish vs selfish",
+        "non_svo_rl_baseline": "Non-SVO RL baseline",
+        "asymmetric_svo_main": "Asymmetric SVO main (15°)",
+        "approx_nash": "Approximate Nash",
+        "empirical_best_response": "Empirical best response",
+    }
+    if label in aliases:
+        return aliases[label]
+
     if label.startswith("svo_sweep_"):
         angle = label.split("_")[-1]
         return f"SVO sweep {angle}°"
     if label.startswith("asymmetric_svo_"):
         angle = label.split("_")[-1]
         return f"Asymmetric SVO {angle}°"
-
-    aliases = {
-        "selfish_vs_selfish": "Selfish vs selfish",
-        "non_svo_rl_baseline": "Non-SVO RL baseline",
-        "asymmetric_svo_main": "Asymmetric SVO main",
-        "approx_nash": "Approximate Nash",
-        "empirical_best_response": "Empirical best response",
-    }
-    if label in aliases:
-        return aliases[label]
 
     a1 = float(config_value(config.get("agent_1_degrees", 0.0)))
     a2 = float(config_value(config.get("agent_2_degrees", 0.0)))
@@ -179,7 +185,7 @@ def save_overview_table(rows: Sequence[ExperimentRow], output_dir: str) -> str:
         else:
             cell.set_width(0.12)
 
-    ax.set_title("Aggregate experiment overview", fontsize=14, fontweight="bold", pad=16)
+    #ax.set_title("Aggregate experiment overview", fontsize=14, fontweight="bold", pad=16)
     output_path = os.path.join(output_dir, "overview_table.png")
     plt.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
@@ -403,6 +409,122 @@ def plot_regret(summary: Dict, rows: Sequence[ExperimentRow], output_dir: str) -
     return output_path
 
 
+def plot_empirical_game_comparison(summary: Dict, output_dir: str) -> str:
+    if "empirical_game_analysis" not in summary:
+        return ""
+
+    agg = summary["empirical_game_analysis"]["aggregate"]
+    universes = ["without_svo", "with_svo"]
+    labels = ["Without SVO", "With SVO"]
+    payoff_joint = [
+        metric_mean(agg[name]["equilibrium"]["payoff_joint"])
+        for name in universes
+    ]
+    exploitability = [
+        metric_mean(agg[name]["equilibrium"]["exploitability"])
+        for name in universes
+    ]
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.8))
+    colors = ["#64748b", "#0f766e"]
+
+    axes[0].bar(labels, payoff_joint, color=colors)
+    axes[0].set_title("Equilibrium joint utility")
+    axes[0].set_ylabel("Joint utility")
+    axes[0].grid(axis="y", alpha=0.25)
+
+    axes[1].bar(labels, exploitability, color=colors)
+    axes[1].set_title("Equilibrium exploitability")
+    axes[1].set_ylabel("Exploitability")
+    axes[1].grid(axis="y", alpha=0.25)
+
+    for ax, values in zip(axes, [payoff_joint, exploitability]):
+        for idx, value in enumerate(values):
+            ax.text(idx, value, f"{value:.2f}", ha="center", va="bottom", fontsize=9)
+
+    fig.suptitle("Empirical Game Comparison", fontsize=14, fontweight="bold")
+    plt.tight_layout()
+    output_path = os.path.join(output_dir, "empirical_game_comparison.png")
+    plt.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
+def direct_method_rows(summary: Dict) -> List[Tuple[str, float, float, float, float]]:
+    if "direct_method_evaluation" not in summary:
+        return []
+    section = summary["direct_method_evaluation"]["aggregate"]["method_comparison_unseen"]
+    rows = []
+    for label, metrics in section.items():
+        rows.append(
+            (
+                label,
+                metric_mean(metrics["success_rate"]),
+                metric_mean(metrics["collision_rate"]),
+                metric_mean(metrics["reward_fairness"]),
+                metric_mean(metrics["multi_objective_utility_joint"]),
+            )
+        )
+    rows.sort(key=lambda item: item[4], reverse=True)
+    return rows
+
+
+def learned_method_rows(summary: Dict) -> List[Tuple[str, float, float, float, float]]:
+    rows = direct_method_rows(summary)
+    learned_prefixes = ("selfish_vs_selfish", "non_svo_rl_baseline", "asymmetric_svo_")
+    return [row for row in rows if row[0].startswith(learned_prefixes)]
+
+
+def empirical_game_summary(summary: Dict) -> Dict[str, Dict]:
+    if "empirical_game_analysis" not in summary:
+        return {}
+    agg = summary["empirical_game_analysis"]["aggregate"]
+    return {
+        "without_svo": {
+            "equilibrium": {k: metric_unwrap(v) for k, v in agg["without_svo"]["equilibrium"].items()},
+        },
+        "with_svo": {
+            "equilibrium": {k: metric_unwrap(v) for k, v in agg["with_svo"]["equilibrium"].items()},
+        },
+    }
+
+
+def plot_with_svo_payoff_heatmap(summary: Dict, output_dir: str) -> str:
+    if "empirical_game_analysis" not in summary:
+        return ""
+
+    matrix = summary["empirical_game_analysis"]["aggregate"]["with_svo"]["payoff_matrix"]
+    row_labels = list(matrix.keys())
+    col_labels = list(next(iter(matrix.values())).keys())
+    values = np.array(
+        [
+            [metric_mean(matrix[row][col]["utility_joint"]) for col in col_labels]
+            for row in row_labels
+        ],
+        dtype=float,
+    )
+
+    fig, ax = plt.subplots(figsize=(max(10, 0.5 * len(col_labels)), max(7, 0.35 * len(row_labels))))
+    image = ax.imshow(values, cmap="YlOrBr", aspect="auto")
+    ax.set_xticks(np.arange(len(col_labels)))
+    ax.set_xticklabels(col_labels, rotation=45, ha="right", fontsize=8)
+    ax.set_yticks(np.arange(len(row_labels)))
+    ax.set_yticklabels(row_labels, fontsize=8)
+    ax.set_title("With-SVO Empirical Game Payoff Matrix\n(joint utility)", fontsize=14, fontweight="bold")
+
+    if values.shape[0] <= 14 and values.shape[1] <= 14:
+        for i in range(values.shape[0]):
+            for j in range(values.shape[1]):
+                ax.text(j, i, f"{values[i, j]:.1f}", ha="center", va="center", fontsize=6)
+
+    fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04, label="Joint utility")
+    plt.tight_layout()
+    output_path = os.path.join(output_dir, "with_svo_payoff_heatmap.png")
+    plt.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
 def format_markdown_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
     lines = [
         "| " + " | ".join(headers) + " |",
@@ -440,6 +562,9 @@ def summarize_cross_play(summary: Dict, row: ExperimentRow) -> List[Tuple[str, f
 
 def write_report(summary: Dict, rows: Sequence[ExperimentRow], output_dir: str, generated_files: Sequence[str]) -> str:
     leaders = best_rows(rows)
+    direct_rows = direct_method_rows(summary)
+    learned_rows = learned_method_rows(summary)
+    empirical_game = empirical_game_summary(summary)
 
     overview_table = format_markdown_table(
         [
@@ -472,13 +597,52 @@ def write_report(summary: Dict, rows: Sequence[ExperimentRow], output_dir: str, 
         [[name, f"{success:.1%}", f"{collision:.1%}"] for name, success, collision in cross_play_rows],
     )
 
+    direct_table = ""
+    if direct_rows:
+        direct_table = format_markdown_table(
+            ["Method", "Success", "Collision", "Fairness", "Joint utility"],
+            [
+                [label, f"{success:.1%}", f"{collision:.1%}", f"{fairness:.3f}", f"{joint:.2f}"]
+                for label, success, collision, fairness, joint in direct_rows[:10]
+            ],
+        )
+
+    learned_table = ""
+    if learned_rows:
+        learned_table = format_markdown_table(
+            ["Learned method", "Success", "Collision", "Fairness", "Joint utility"],
+            [
+                [label, f"{success:.1%}", f"{collision:.1%}", f"{fairness:.3f}", f"{joint:.2f}"]
+                for label, success, collision, fairness, joint in learned_rows
+            ],
+        )
+
+    empirical_game_lines: List[str] = []
+    if empirical_game:
+        wo = empirical_game["without_svo"]["equilibrium"]
+        ws = empirical_game["with_svo"]["equilibrium"]
+        empirical_game_lines = [
+            "## Empirical Game Comparison",
+            "",
+            f"- Without SVO equilibrium: **{wo['policy_1']}** vs **{wo['policy_2']}**, joint utility **{wo['payoff_joint']:.2f}**, exploitability **{wo['exploitability']:.2f}**.",
+            f"- With SVO equilibrium: **{ws['policy_1']}** vs **{ws['policy_2']}**, joint utility **{ws['payoff_joint']:.2f}**, exploitability **{ws['exploitability']:.2f}**.",
+            f"- Net equilibrium joint-utility change from adding SVO policies: **{ws['payoff_joint'] - wo['payoff_joint']:+.2f}**.",
+            "",
+        ]
+
     interpretations = [
         "Success rate is the primary completion metric: higher is better.",
         "Collision rate is the primary safety metric: lower is better, even when success is high.",
         "Average time to clear measures efficiency among successful interactions: lower means faster resolution.",
         "Reward fairness near 1.0 means both agents receive similar returns; lower values indicate more asymmetric outcomes.",
         "A negative generalization gap means performance drops on the unseen test split relative to the seen split.",
-        "Regret measures how much value the learned policy leaves on the table against a fixed opponent; lower is better.",
+        "Regret measures how much multi-objective value a policy leaves on the table relative to the best response in the shared policy universe; lower is better.",
+    ]
+
+    presenter_notes = [
+        "The strongest headline metric is no longer raw self-play reward; use unseen success, unseen collision, and direct-method joint utility.",
+        "Lead with the direct-method table and the empirical-game comparison, then use the SVO sweep to show where performance peaks and where it degrades.",
+        "If two methods have similar self-play scores, use cross-play against `approx_nash`, `empirical_best_response`, and mixed populations to separate them.",
     ]
 
     report_lines = [
@@ -493,16 +657,29 @@ def write_report(summary: Dict, rows: Sequence[ExperimentRow], output_dir: str, 
         f"- Lowest unseen collision: **{leaders['lowest_unseen_collision'].display}** at **{leaders['lowest_unseen_collision'].unseen_collision:.1%}**.",
         f"- Best fairness: **{leaders['best_fairness'].display}** at **{leaders['best_fairness'].fairness:.3f}**.",
         f"- Fastest unseen clearance: **{leaders['fastest_unseen_clearance'].display}** at **{leaders['fastest_unseen_clearance'].unseen_time:.2f}s**.",
+        *(
+            [
+                f"- Top method in direct unseen comparison: **{direct_rows[0][0]}** with joint utility **{direct_rows[0][4]:.2f}**."
+            ]
+            if direct_rows else []
+        ),
         "",
         "## Aggregate table",
         "",
         overview_table,
         "",
+        *([ "## Direct Unseen Method Ranking", "", direct_table, "" ] if direct_table else []),
+        *([ "## Learned-Only Ranking", "", learned_table, "" ] if learned_table else []),
+        *empirical_game_lines,
         "## Cross-play snapshot",
         "",
         f"Top unseen cross-play results for the strongest unseen self-play configuration, **{cross_play_leader.display}**:",
         "",
         cross_play_table,
+        "",
+        "## Presenter Notes",
+        "",
+        *[f"- {line}" for line in presenter_notes],
         "",
         "## How to interpret the plots",
         "",
@@ -517,6 +694,63 @@ def write_report(summary: Dict, rows: Sequence[ExperimentRow], output_dir: str, 
     output_path = os.path.join(output_dir, "experiment_summary_report.md")
     with open(output_path, "w", encoding="utf-8") as handle:
         handle.write("\n".join(report_lines))
+    return output_path
+
+
+def write_presentation_report(summary: Dict, rows: Sequence[ExperimentRow], output_dir: str) -> str:
+    leaders = best_rows(rows)
+    learned_rows = learned_method_rows(summary)
+    empirical_game = empirical_game_summary(summary)
+    top_learned = learned_rows[0] if learned_rows else None
+
+    lines = [
+        "# Presentation Summary",
+        "",
+        "## Main findings",
+        "",
+        f"- Best learned policy on unseen self-play: **{leaders['best_unseen_success'].display}** with **{leaders['best_unseen_success'].unseen_success:.1%}** success and **{leaders['best_unseen_success'].unseen_collision:.1%}** collision.",
+        f"- Best fairness among learned policies: **{leaders['best_fairness'].display}** at **{leaders['best_fairness'].fairness:.3f}**.",
+    ]
+
+    if top_learned:
+        lines.append(
+            f"- Top learned method in direct unseen comparison: **{top_learned[0]}** with joint utility **{top_learned[4]:.2f}**."
+        )
+
+    if empirical_game:
+        wo = empirical_game["without_svo"]["equilibrium"]
+        ws = empirical_game["with_svo"]["equilibrium"]
+        lines.extend(
+            [
+                f"- Empirical game without SVO converges to **{wo['policy_1']} vs {wo['policy_2']}** with joint utility **{wo['payoff_joint']:.2f}**.",
+                f"- Empirical game with SVO converges to **{ws['policy_1']} vs {ws['policy_2']}** with joint utility **{ws['payoff_joint']:.2f}**.",
+                f"- Adding SVO policies improves equilibrium joint utility by **{ws['payoff_joint'] - wo['payoff_joint']:+.2f}**.",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Slide framing",
+            "",
+            "- Lead with unseen success and collision, not raw reward.",
+            "- Present the learned-only ranking before showing oracle-style references such as empirical best response.",
+            "- Use the with-vs-without-SVO equilibrium comparison as the core game-theoretic result.",
+            "- Use the SVO sweep to show that small asymmetric SVO helps, while larger angles degrade performance.",
+            "",
+            "## Recommended figures",
+            "",
+            "- `overview_table.png`",
+            "- `svo_sweep_summary.png`",
+            "- `empirical_game_comparison.png`",
+            "- `with_svo_payoff_heatmap.png`",
+            "",
+        ]
+    )
+
+    output_path = os.path.join(output_dir, "presentation_summary.md")
+    with open(output_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines))
     return output_path
 
 
@@ -541,14 +775,18 @@ def main() -> None:
         plot_cross_play(summary, rows, args.output_dir),
         plot_svo_sweep(rows, args.output_dir),
         plot_regret(summary, rows, args.output_dir),
+        plot_empirical_game_comparison(summary, args.output_dir),
+        plot_with_svo_payoff_heatmap(summary, args.output_dir),
     ]
     report_path = write_report(summary, rows, args.output_dir, generated_files)
+    presentation_report_path = write_presentation_report(summary, rows, args.output_dir)
 
     print(f"Wrote analysis assets to {args.output_dir}")
     for path in generated_files:
         if path:
             print(f"- {path}")
     print(f"- {report_path}")
+    print(f"- {presentation_report_path}")
 
 
 if __name__ == "__main__":

@@ -164,6 +164,39 @@ class TestTrainingAndEvaluation(unittest.TestCase):
         for key in ("min_time_to_collision", "safety_margin", "avg_jerk", "reward_fairness"):
             self.assertIn(key, metrics)
 
+    def test_policy_library_builds_richer_universe(self):
+        from agents.heuristic import create_heuristic_pair
+        from agents.policy_library import DEFAULT_HEURISTIC_LIBRARY, policy_specs_with_svo
+
+        pair_map = policy_specs_with_svo(
+            DEFAULT_HEURISTIC_LIBRARY,
+            {"non_svo_rl_baseline": create_heuristic_pair("priority", "yield")},
+        )
+        self.assertIn("aggressive_fast", pair_map)
+        self.assertIn("yield_early", pair_map)
+        self.assertIn("non_svo_rl_baseline", pair_map)
+
+    def test_empirical_game_analysis_uses_common_universe(self):
+        from agents.heuristic import create_heuristic_pair
+        from env.intersection_env import IntersectionEnv
+        from evaluation.empirical_game import analyze_empirical_game
+
+        env = IntersectionEnv()
+        result = analyze_empirical_game(
+            policy_pairs={
+                "priority": create_heuristic_pair("priority", "priority"),
+                "yield": create_heuristic_pair("yield", "yield"),
+            },
+            env=env,
+            n_episodes=2,
+            seed=2,
+            scenario_split="train",
+        )
+        self.assertIn("priority", result.payoff_matrix)
+        self.assertIn("yield", result.best_response_1)
+        self.assertIn("policy_1", result.equilibrium)
+        self.assertIn("priority", result.regret_table_1)
+
 
 class TestMetrics(unittest.TestCase):
     def test_summary_contains_extended_metrics(self):

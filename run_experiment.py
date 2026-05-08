@@ -16,11 +16,16 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import yaml
 
-from agents.gradient_solver import approximate_nash_equilibrium, empirical_best_response
 from agents.heuristic import MixtureAgent, create_heuristic_agent, create_heuristic_pair
+from agents.policy_library import (
+    DEFAULT_HEURISTIC_LIBRARY,
+    policy_specs_with_svo,
+    policy_specs_without_svo,
+)
 from env.intersection_env import IntersectionEnv
 from env.rewards import RewardFunction
 from evaluation.compare_methods import compare_methods, evaluate_cross_play, run_eval_episodes
+from evaluation.empirical_game import analyze_empirical_game
 from evaluation.metrics import compute_generalization_gap, summarize_episodes
 from training.train_rl import train_rl_agent
 
@@ -154,62 +159,6 @@ def _opponent_pairs(params: dict) -> Dict[str, Tuple[Any, Any]]:
     return pairs
 
 
-def _game_theoretic_pairs(
-    params: dict,
-    env: IntersectionEnv,
-    n_episodes: int,
-    utility_weights: Dict[str, float],
-) -> Tuple[Dict[str, Tuple[Any, Any]], Dict[str, Any]]:
-    eval_cfg = params["evaluation"]
-    nash = approximate_nash_equilibrium(
-        env=deepcopy(env),
-        n_episodes=n_episodes,
-        candidate_policies=eval_cfg.get(
-            "game_baseline_candidates",
-            ["constant", "cautious", "aggressive", "yield", "priority"],
-        ),
-        utility_weights=utility_weights,
-    )
-    approx_nash_pair = (
-        create_heuristic_agent("agent_1", nash.policy_1),
-        create_heuristic_agent("agent_2", nash.policy_2),
-    )
-    br_1, br_scores_1 = empirical_best_response(
-        env=deepcopy(env),
-        opponent_policy=nash.policy_2,
-        agent_id="agent_1",
-        n_episodes=n_episodes,
-        utility_weights=utility_weights,
-    )
-    br_2, br_scores_2 = empirical_best_response(
-        env=deepcopy(env),
-        opponent_policy=nash.policy_1,
-        agent_id="agent_2",
-        n_episodes=n_episodes,
-        utility_weights=utility_weights,
-    )
-    pairs = {
-        "approx_nash": approx_nash_pair,
-        "empirical_best_response": (br_1, br_2),
-    }
-    metadata = {
-        "approx_nash": {
-            "policy_1": nash.policy_1,
-            "policy_2": nash.policy_2,
-            "payoff_1": nash.payoff_1,
-            "payoff_2": nash.payoff_2,
-            "exploitability": nash.exploitability,
-        },
-        "empirical_best_response": {
-            "policy_1": br_1.label,
-            "policy_2": br_2.label,
-            "candidate_scores_1": br_scores_1,
-            "candidate_scores_2": br_scores_2,
-        },
-    }
-    return pairs, metadata
-
-
 def train_one_seed(params: dict, config: Dict[str, Any], seed: int):
     tr_cfg = params["training"]
     ql_cfg = params["q_learning"]
@@ -234,16 +183,71 @@ def train_one_seed(params: dict, config: Dict[str, Any], seed: int):
     return agent_1, agent_2, train_metrics
 
 
-def _best_response_summary(env: IntersectionEnv, opponent_policy: str, n_episodes: int) -> Dict[str, Any]:
-    br_agent, scores = empirical_best_response(
-        env=env,
-        opponent_policy=opponent_policy,
-        n_episodes=n_episodes,
-    )
-    return {
-        "policy": br_agent.label,
-        "candidate_scores": scores,
+def _baseline_pairs_from_game(
+    empirical_game: Dict[str, Any],
+    policy_pairs: Dict[str, Tuple[Any, Any]],
+) -> Tuple[Dict[str, Tuple[Any, Any]], Dict[str, Any]]:
+    equilibrium = empirical_game["equilibrium"]
+    eq_policy_1 = str(equilibrium["policy_1"])
+    eq_policy_2 = str(equilibrium["policy_2"])
+    br_policy_1 = str(empirical_game["best_response_1"][eq_policy_2]["policy"])
+    br_policy_2 = str(empirical_game["best_response_2"][eq_policy_1]["policy"])
+
+    pairs = {
+        "approx_nash": (policy_pairs[eq_policy_1][0], policy_pairs[eq_policy_2][1]),
+        "empirical_best_response": (policy_pairs[br_policy_1][0], policy_pairs[br_policy_2][1]),
     }
+    metadata = {
+        "approx_nash": equilibrium,
+        "empirical_best_response": {
+            "policy_1": br_policy_1,
+            "policy_2": br_policy_2,
+            "candidate_scores_1": empirical_game["best_response_1"],
+            "candidate_scores_2": empirical_game["best_response_2"],
+        },
+    }
+    return pairs, metadata
+
+
+def _empirical_game_universes(
+    trained_agents: Dict[str, Tuple[Any, Any]],
+) -> Dict[str, Dict[str, Tuple[Any, Any]]]:
+    return {
+        "without_svo": policy_specs_without_svo(DEFAULT_HEURISTIC_LIBRARY, trained_agents),
+        "with_svo": policy_specs_with_svo(DEFAULT_HEURISTIC_LIBRARY, trained_agents),
+    }
+
+
+def _analyze_empirical_games_for_seed(
+    params: dict,
+    seed: int,
+    trained_agents: Dict[str, Tuple[Any, Any]],
+) -> Dict[str, Any]:
+    utility_weights = _utility_weights(params)
+    n_eval = params["evaluation"]["num_eval_episodes"]
+    unseen_env = _make_env(params, "test")
+    universes = _empirical_game_universes(trained_agents)
+    results: Dict[str, Any] = {}
+
+    for universe_name, policy_pairs in universes.items():
+        game_result = analyze_empirical_game(
+            policy_pairs=policy_pairs,
+            env=deepcopy(unseen_env),
+            n_episodes=n_eval,
+            seed=seed,
+            scenario_split="test",
+            utility_weights=utility_weights,
+        )
+        results[universe_name] = {
+            "equilibrium": game_result.equilibrium,
+            "best_response_1": game_result.best_response_1,
+            "best_response_2": game_result.best_response_2,
+            "regret_table_1": game_result.regret_table_1,
+            "regret_table_2": game_result.regret_table_2,
+            "payoff_matrix": game_result.payoff_matrix,
+        }
+
+    return results
 
 
 def evaluate_one_seed(
@@ -255,6 +259,7 @@ def evaluate_one_seed(
     rl_opponents: Dict[str, Tuple[Any, Any]],
     baseline_pairs: Dict[str, Tuple[Any, Any]],
     baseline_metadata: Dict[str, Any],
+    empirical_game_reference: Dict[str, Any],
 ) -> Dict[str, Any]:
     eval_cfg = params["evaluation"]
     n_eval = eval_cfg["num_eval_episodes"]
@@ -297,17 +302,16 @@ def evaluate_one_seed(
     for opponent_name, opponent_pair in heuristic_opponents.items():
         if "_vs_" not in opponent_name:
             continue
-        opponent_policy = opponent_name.split("_vs_")[-1]
-        br_agent, scores = empirical_best_response(
-            env=deepcopy(unseen_env),
-            opponent_policy=opponent_policy,
-            n_episodes=n_eval,
-            utility_weights=utility_weights,
-        )
-        best_response_value = max(scores.values())
+        if config["label"] not in empirical_game_reference["with_svo"]["regret_table_1"]:
+            continue
+        best_response_1 = empirical_game_reference["with_svo"]["best_response_1"]
+        mapped_policy = baseline_metadata.get("opponent_policy_map", {}).get(opponent_name)
+        if mapped_policy is None:
+            continue
+        best_response_value = float(best_response_1[mapped_policy]["value"])
         trained_payoff = cross_unseen[config["label"]][opponent_name]["multi_objective_utility_1"]
         regret[opponent_name] = {
-            "best_response_policy": br_agent.label,
+            "best_response_policy": best_response_1[mapped_policy]["policy"],
             "best_response_value": best_response_value,
             "trained_value": trained_payoff,
             "regret": best_response_value - trained_payoff,
@@ -339,6 +343,7 @@ def evaluate_one_seed(
             **baseline_metadata,
             "heuristic_baselines": heuristic_results,
         },
+        "empirical_game_reference": empirical_game_reference["with_svo"],
     }
 
 
@@ -346,14 +351,15 @@ def _evaluate_method_tables_for_seed(
     params: dict,
     seed: int,
     trained_agents: Dict[str, Tuple[Any, Any]],
+    baseline_pairs: Dict[str, Tuple[Any, Any]],
+    game_metadata: Dict[str, Any],
 ) -> Dict[str, Any]:
     utility_weights = _utility_weights(params)
     n_eval = params["evaluation"]["num_eval_episodes"]
     unseen_env = _make_env(params, "test")
     seen_env = _make_env(params, "train")
     heuristic_pairs = _opponent_pairs(params)
-    game_pairs, game_metadata = _game_theoretic_pairs(params, unseen_env, n_eval, utility_weights)
-    method_pairs = {**trained_agents, **heuristic_pairs, **game_pairs}
+    method_pairs = {**trained_agents, **heuristic_pairs, **baseline_pairs}
 
     return {
         "method_comparison_seen": compare_methods(
@@ -421,6 +427,7 @@ def main():
 
     all_seed_results: Dict[str, List[Dict[str, Any]]] = {cfg["label"]: [] for cfg in configs}
     direct_eval_per_seed: List[Dict[str, Any]] = []
+    empirical_game_per_seed: List[Dict[str, Any]] = []
     trained_agents_by_seed: Dict[int, Dict[str, Tuple[Any, Any]]] = {}
     train_metrics_by_config: Dict[str, List[Dict[str, Any]]] = {cfg["label"]: [] for cfg in configs}
 
@@ -432,12 +439,22 @@ def main():
             trained_agents_by_seed[seed][config["label"]] = (agent_1, agent_2)
             train_metrics_by_config[config["label"]].append(train_metrics)
 
-        baseline_pairs, baseline_metadata = _game_theoretic_pairs(
+        empirical_game_reference = _analyze_empirical_games_for_seed(
             params=params,
-            env=_make_env(params, "test"),
-            n_episodes=params["evaluation"]["num_eval_episodes"],
-            utility_weights=_utility_weights(params),
+            seed=seed,
+            trained_agents=trained_agents_by_seed[seed],
         )
+        empirical_game_per_seed.append(empirical_game_reference)
+        policy_universe = _empirical_game_universes(trained_agents_by_seed[seed])["with_svo"]
+        baseline_pairs, baseline_metadata = _baseline_pairs_from_game(
+            empirical_game_reference["with_svo"],
+            policy_universe,
+        )
+        baseline_metadata["opponent_policy_map"] = {
+            opponent_name: opponent_name.split("_vs_")[-1]
+            for opponent_name in _opponent_pairs(params)
+            if "_vs_" in opponent_name
+        }
 
         for config in configs:
             rl_opponents = {
@@ -456,6 +473,7 @@ def main():
                 rl_opponents=rl_opponents,
                 baseline_pairs=baseline_pairs,
                 baseline_metadata=baseline_metadata,
+                empirical_game_reference=empirical_game_reference,
             )
             all_seed_results[config["label"]].append(seed_result)
 
@@ -464,6 +482,8 @@ def main():
                 params=params,
                 seed=seed,
                 trained_agents=trained_agents_by_seed[seed],
+                baseline_pairs=baseline_pairs,
+                game_metadata=baseline_metadata,
             )
         )
 
@@ -483,6 +503,10 @@ def main():
         "direct_method_evaluation": {
             "per_seed": direct_eval_per_seed,
             "aggregate": _aggregate_numeric(direct_eval_per_seed),
+        },
+        "empirical_game_analysis": {
+            "per_seed": empirical_game_per_seed,
+            "aggregate": _aggregate_numeric(empirical_game_per_seed),
         },
     }
     save_outputs(final_results, params)
